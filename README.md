@@ -1,92 +1,64 @@
-# PolyWorld
+# 🌳 TreeMap
 
-Real-time [Polymarket](https://polymarket.com) prediction market visualization dashboard with an interactive world map.
+**Real-time tree service lead intelligence for Greater Boston.**
 
-![License](https://img.shields.io/badge/license-MIT-blue)
+Forked from [PolyWorld](https://github.com/AmazingAng/PolyWorld). Built for a hackathon to demonstrate agentic AI applied to a concrete operational problem: identifying storm-damaged properties and reaching owners fast.
 
-## Features
+**Live demo:** https://treemap.hunter-d8a.workers.dev
 
-- **Interactive World Map** — Browse 500+ prediction markets plotted on a MapLibre GL globe with clustering, category filters, and regional views
-- **14 Live Panels** — Markets, Detail, Region, News, Tweets, Live Streams, Watchlist, Leaderboard, Smart Trades, Whale Trades, Order Book, Trader, Sentiment, Price Chart
-- **AI-Powered Insights** — Market summaries, news relevance matching, and sentiment analysis via Claude API
-- **Smart Money Tracking** — Whale trade monitoring, leaderboard rankings, and wallet-level trade history
-- **Real-Time Data** — Auto-refreshing market data (45s), smart money (30s), order book (10s), and news feeds
-- **Drag & Resize Layout** — Fully customizable panel grid with drag reordering, column/row span controls, and split bottom/right layout
-- **Watchlist & Alerts** — Star markets, set price/volume alerts with browser notifications
+## What it does
 
-## Tech Stack
+Watches real FEMA + NWS + NEXRAD weather feeds for storms hitting the Greater Boston service area. When a storm lands:
 
-- **Framework:** Next.js 16 (App Router), React 19
-- **State:** Zustand 5
-- **Map:** MapLibre GL JS
-- **Charts:** lightweight-charts (TradingView)
-- **Database:** SQLite (better-sqlite3)
-- **AI:** Claude API (@anthropic-ai/sdk)
-- **Styling:** Tailwind CSS 4 + CSS custom properties
+1. **Canopy Scorer agent** — vision/LLM rescores property NDVI from the damage zone
+2. **Outreach Writer agent** — streams personalized direct mail copy per owner
+3. **Impact Analyst agent** — ranks counties by severity + affected properties
+4. **Notify agent** — sends real Resend emails to property owners
+5. **Voice agent** — places real Twilio phone calls reading the outreach script
 
-## Getting Started
+All agent calls instrumented with a Weave-style trace layer (input/output/latency/tokens/cost). Designed for swap-in to W&B Weave + CoreWeave vLLM inference.
 
-### Prerequisites
+## Stack
 
-- Node.js 18+
-- npm
+- **Next.js 16** App Router + React 19 + TypeScript strict
+- **MapLibre GL 5** (globe projection) + CARTO dark style
+- **Zustand 5** state (5 stores)
+- **Tailwind CSS 4**
+- **LLM providers (priority order):** CoreWeave (OpenAI-compat vLLM) → Google Gemini 2.5 Flash → Anthropic Claude
+- **Data:** FEMA OpenFEMA, api.weather.gov NWS, Iowa Mesonet NEXRAD radar, Open-Meteo forecasts — all keyless, free
+- **Email:** Resend
+- **Voice:** Twilio
+- **Deploy:** Cloudflare Workers (via @opennextjs/cloudflare) or any Node host (Vercel, Fly.io, Docker)
 
-### Setup
+## Quick start
 
 ```bash
-# Clone
-git clone https://github.com/AmazingAng/PolyWorld.git
-cd PolyWorld
-
-# Install dependencies
+git clone https://github.com/smallgiraffe0110/treemap
+cd treemap
 npm install
-
-# Configure environment variables
-cp .env.example .env
-# Edit .env with your API keys
-
-# Start dev server
+cp .env.example .env.local
+# At minimum, set GEMINI_API_KEY or ANTHROPIC_API_KEY
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open http://localhost:3000.
 
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `AI_BASE_URL` | Yes | Anthropic API base URL |
-| `AI_API_KEY` | Yes | Anthropic API key (for summaries, news matching, sentiment) |
-| `AI_FALLBACK_BASE_URL` | No | Fallback API base URL |
-| `AI_FALLBACK_API_KEY` | No | Fallback API key (used if primary fails) |
-
-The app works without AI keys — summaries and sentiment will be disabled, but all market data, charts, and trading features remain functional.
-
-## Project Structure
-
-```
-src/
-├── app/          # Next.js App Router, API routes
-├── components/   # 14 panel components + Header, WorldMap, etc.
-├── hooks/        # Custom hooks (preferences, watchlist, alerts, drag, resize)
-├── lib/          # Data processing, AI clients, news/tweet sources
-├── stores/       # Zustand: marketStore, smartMoneyStore, uiStore
-└── types/        # TypeScript definitions
-```
-
-## Scripts
+## Deploy
 
 ```bash
-npm run dev      # Development server
-npm run build    # Production build
-npm run start    # Production server
-npm run lint     # ESLint
+# Cloudflare Workers
+npm run cf:deploy
+
+# Any Node host
+npm run build && node .next/standalone/server.js
 ```
 
-## Acknowledgements
+## Architecture
 
-Inspired by [WorldMonitor](https://worldmonitor.app/).
+See [TECH_INFRASTRUCTURE.md](./TECH_INFRASTRUCTURE.md) for full stack details and the planned CoreWeave / W&B Weave integration.
+
+See [DEMO_SCRIPT.md](./DEMO_SCRIPT.md) for the 90-second demo walkthrough.
 
 ## License
 
-[MIT](LICENSE)
+MIT

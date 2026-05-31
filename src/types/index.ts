@@ -1,206 +1,113 @@
-export interface PolymarketEvent {
+export interface Property {
   id: string;
-  title: string;
-  slug: string;
-  description?: string;
-  markets: PolymarketMarket[];
-  /** Primary volume field — use this first */
-  volume?: number;
-  /** @deprecated Alias for volume — some API versions use this */
-  volume_num?: number;
-  /** @deprecated Use volume24hr instead (snake_case variant) */
-  volume_24hr?: number;
-  /** 24-hour volume — normalized in processEvents() */
-  volume24hr?: number;
-  liquidity?: number;
-  tags?: Array<{ id?: number; label?: string; name?: string; slug?: string }>;
-  oneDayPriceChange?: number;
-  active?: boolean;
-  closed?: boolean;
-  endDate?: string;
-  resolutionSource?: string;
-  image?: string;
-  commentCount?: number;
-  startDate?: string;
-  createdAt?: string;
-  /** true = mutually exclusive outcomes (election, championship); false = independent/overlapping (date thresholds) */
-  negRisk?: boolean;
-}
-
-export interface PolymarketMarket {
-  id: string;
-  question?: string;
-  groupItemTitle?: string;
-  clobTokenIds?: string[] | string;
-  outcomePrices?: string[] | string;
-  outcomes?: string[];
-  volume?: number;
-  volume24hr?: number;
-  /** @deprecated snake_case alias — Gamma API uses camelCase `volume24hr` */
-  volume_24hr?: number;
-  oneDayPriceChange?: number;
-  liquidity?: number;
-  active?: boolean;
-  closed?: boolean;
-}
-
-export type Category =
-  | "Politics"
-  | "Crypto"
-  | "Sports"
-  | "Finance"
-  | "Tech"
-  | "Culture"
-  | "Other";
-
-export type ImpactLevel = "critical" | "high" | "medium" | "low" | "info";
-
-export interface AnomalyInfo {
-  zScore: number;
-  isAnomaly: boolean;
-  direction: "up" | "down" | "neutral";
-  volumeSpike: boolean;
-}
-
-export interface ProcessedMarket {
-  id: string;
-  marketId: string;
-  title: string;
-  slug: string;
-  category: Category;
-  volume: number;
-  volume24h: number;
-  prob: number | null;
-  change: number | null;
-  recentChange: number | null;
-  markets: PolymarketMarket[];
-  location: string | null;
-  coords: [number, number] | null;
-  createdAt?: string | null;
-  // P1 fields
-  description: string | null;
-  resolutionSource: string | null;
-  endDate: string | null;
-  image: string | null;
-  // P2 fields
-  liquidity: number;
-  active: boolean;
-  closed: boolean;
-  commentCount: number;
-  tags: string[];
-  // Intelligence fields
-  impactScore: number;
-  impactLevel: ImpactLevel;
-  anomaly?: AnomalyInfo;
-  smartMoney?: SmartMoneyFlow | null;
-  indicators?: MarketIndicators;
-  /** true = mutually exclusive outcomes (valid for arbitrage) */
-  negRisk?: boolean;
-  // Chinese locale fields (display only)
-  titleZh?: string | null;
-  descriptionZh?: string | null;
-  marketsZh?: PolymarketMarket[] | null;
-}
-
-export interface GeoResult {
-  coords: [number, number];
-  location: string;
-}
-
-export interface NewsItem {
-  id: string;
-  title: string;
-  url: string;
-  source: string;
-  sourceUrl: string;
-  summary: string | null;
-  publishedAt: string;
-  imageUrl: string | null;
-  categories: string[];
-}
-
-export interface NewsSource {
-  name: string;
-  feedUrl: string;
-  region: string;
-}
-
-export interface TweetItem {
-  id: string;           // SHA256(url).slice(0,32)
-  handle: string;       // @username
-  authorName: string;   // display name
-  text: string;         // tweet body
-  url: string;          // link to tweet
-  publishedAt: string;  // ISO date
-  relevanceScore?: number;
-}
-
-export interface SmartWallet {
   address: string;
-  username: string | null;
-  pnl: number;
-  volume: number;
-  rank: number;
-  profileImage: string | null;
+  lat: number;
+  lng: number;
+  ownerName: string;
+  neighborhood: string;
+  treeCount: number;
+  ndviScore: number;          // 0-100, lower = more stressed canopy
+  stormProximityMiles: number;
+  urgencyScore: number;       // 0-100, higher = hotter lead
+  zipCode: string;
+  city: string;
+  mailReady: boolean;
 }
 
-export interface WhaleTrade {
-  wallet: string;
-  username?: string;
-  conditionId: string;
-  eventId: string | null;
-  side: "BUY" | "SELL";
-  size: number;
-  price: number;
-  usdcSize: number;
-  outcome: string;
+export interface FemaDeclaration {
+  id: string;
+  declarationDate: string;
+  designatedArea: string;     // county name
+  incidentType: string;
   title: string;
-  slug: string;
-  timestamp: string;
-  isSmartWallet: boolean;
 }
 
-export interface OrderBookLevel {
-  price: number;
-  size: number;
-  cumSize: number;
+export interface MailLabel {
+  ownerName: string;
+  address: string;
+  city: string;
+  state: string;
+  zip: string;
 }
 
-export interface OrderBookData {
-  bids: OrderBookLevel[];
-  asks: OrderBookLevel[];
-  lastTradePrice: number;
-  spread: number;
-  midPrice: number;
-  tickSize: number;
+export type Neighborhood =
+  | "Jamaica Plain"
+  | "Roslindale"
+  | "West Roxbury"
+  | "Hyde Park"
+  | "Dorchester"
+  | "Mattapan"
+  | "Brighton"
+  | "Allston";
+
+// ─── Agent types ─────────────────────────────────────────────
+
+export type AgentName = "canopy" | "outreach" | "impact" | "notify" | "voice";
+
+export type AgentStatus = "running" | "success" | "error";
+
+export interface AgentTrace {
+  id: string;
+  agent: AgentName;
+  op: string;
+  status: AgentStatus;
+  startedAt: number;       // epoch ms
+  endedAt?: number;
+  durationMs?: number;
+  inputSummary: string;    // short user-readable
+  outputSummary?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  costUsd?: number;
+  error?: string;
+  weaveUrl?: string;       // link to W&B Weave trace (when configured)
+  model?: string;
+  provider?: "anthropic" | "coreweave" | "gemini";
 }
 
-export interface SentimentSubScore {
-  name: string;
-  value: number;
-  weight: number;
+export interface CanopyResult {
+  ndviScore: number;
+  damageClass: "fallen" | "leaning" | "thinning" | "healthy";
+  confidence: number;     // 0-1
+  rationale: string;
+  newUrgencyScore: number;
 }
 
-export interface SentimentIndex {
-  score: number;
-  label: string;
-  subScores: SentimentSubScore[];
-  activeMarkets: number;
-  updatedAt: string;
+export interface OutreachCopy {
+  greeting: string;
+  body: string;            // 2-3 sentence personalized hook
+  cta: string;
+  signature: string;
 }
 
-export interface MarketIndicators {
-  momentum: number | null;           // price change acceleration = (change_now - change_6h_ago)
-  volatility: number | null;         // 24h prob standard deviation
-  orderFlowImbalance: number | null; // (smartBuys - smartSells) / total
+export interface ImpactReport {
+  countyRankings: Array<{ county: string; affectedCount: number; severity: number; reason: string }>;
+  summary: string;
+  hottestPropertyIds: string[];
 }
 
-export interface SmartMoneyFlow {
-  smartBuys: number;
-  smartSells: number;
-  whaleBuys: number;
-  whaleSells: number;
-  netFlow: "bullish" | "bearish" | "neutral";
-  topWallets: Array<{ address: string; username: string | null; side: "BUY" | "SELL"; size: number }>;
-  recentTrades: WhaleTrade[];
+export interface NotifyResult {
+  sent: number;
+  previewed: number;
+  preview: Array<{ to: string; subject: string; body: string }>;
+  realSend: boolean;
 }
+
+export interface VoiceResult {
+  status: "queued" | "preview" | "error";
+  callSid?: string;
+  to: string;
+  spokenText: string;
+  realCall: boolean;
+}
+
+export const NEIGHBORHOODS: Neighborhood[] = [
+  "Jamaica Plain",
+  "Roslindale",
+  "West Roxbury",
+  "Hyde Park",
+  "Dorchester",
+  "Mattapan",
+  "Brighton",
+  "Allston",
+];

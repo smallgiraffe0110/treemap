@@ -1,78 +1,36 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
-import Providers from "@/components/Providers";
-import ChunkLoadRecovery from "@/components/ChunkLoadRecovery";
+import { SwRegister } from "@/components/SwRegister";
 
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://polyworld.app";
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://treemap.app";
 
 export const viewport: Viewport = {
   viewportFit: "cover",
+  themeColor: "#22c55e",
 };
 
 export const metadata: Metadata = {
-  title: "PolyWorld — Prediction Market World Monitor",
+  title: "TreeMap — Boston Tree Service Lead Intelligence",
   description:
-    "Real-time world map showing Polymarket prediction markets by region. Track smart money, whale trades, and market signals before the news.",
+    "Real-time map of storm-damaged and tree-stressed properties across Greater Boston. Generate priority direct mail lists in one click.",
   metadataBase: new URL(SITE_URL),
-  openGraph: {
-    title: "PolyWorld — Prediction Market World Monitor",
-    description:
-      "Real-time world map showing Polymarket prediction markets by region. Track smart money, whale trades, and market signals.",
-    url: SITE_URL,
-    siteName: "PolyWorld",
-    type: "website",
-    locale: "en_US",
-    images: [{ url: "/opengraph-image", width: 1200, height: 630, alt: "PolyWorld — Prediction Market World Map" }],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "PolyWorld — Prediction Market World Monitor",
-    description:
-      "Real-time world map of Polymarket prediction markets. Smart money tracking, whale alerts, and market signals.",
-    images: ["/opengraph-image"],
-  },
-  robots: {
-    index: true,
-    follow: true,
-  },
-  icons: {
-    icon: "/icon-192.png",
-    apple: "/apple-touch-icon.png",
-  },
-  other: {
-    "color-scheme": "dark",
-  },
+  manifest: "/manifest.webmanifest",
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "TreeMap" },
+  other: { "color-scheme": "dark" },
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html
-      lang="en"
-      className="dark"
-      style={{ colorScheme: "dark" }}
-      suppressHydrationWarning
-    >
+    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
       <head>
         <link
-          href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@700;800&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700;800&family=Inter:wght@400;500;600&display=swap"
           rel="stylesheet"
         />
       </head>
       <body className="antialiased">
-        {/* Detect Chrome Android bottom toolbar before React hydrates */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `try{var v=window.visualViewport;if(v){var b=window.innerHeight-v.height-v.offsetTop;if(b>0)document.documentElement.style.setProperty("--browser-bottom-bar",b+"px")}}catch(e){}`,
-          }}
-        />
-        <ChunkLoadRecovery />
-        <Providers>
-          {children}
-        </Providers>
+        <SwRegister />
+        {children}
       </body>
     </html>
   );

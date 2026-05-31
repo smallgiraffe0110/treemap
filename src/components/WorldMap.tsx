@@ -1,2112 +1,1361 @@
 "use client";
 
-import React, { useEffect, useRef, useCallback, useState, lazy, Suspense, memo } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { ProcessedMarket, Category, WhaleTrade } from "@/types";
-import { CATEGORY_COLORS, CATEGORY_SHAPES, CATEGORY_EMOJI, detectSubEmoji, ALL_SUB_EMOJIS } from "@/lib/categories";
-import { IMPACT_COLORS } from "@/lib/impact";
-import type { ImpactLevel } from "@/types";
-import { formatVolume, formatPct, formatChange } from "@/lib/format";
-import { REGIONAL_VIEWS } from "@/lib/regions";
-import { topojsonFeature } from "@/lib/topojson";
-import { getCountryFlag, marketMatchesCountry } from "@/lib/countries";
-import type { TimeRange } from "./TimeRangeFilter";
-import MapToolbar from "./MapToolbar";
-import { useI18n } from "@/i18n";
-import { localizeMarket } from "@/hooks/useLocalizedMarket";
-import type { OverlayLayer } from "./MapToolbar";
+import { useLeadStore } from "@/stores/leadStore";
+import { useAlertStore } from "@/stores/alertStore";
+import { useWeatherStore } from "@/stores/weatherStore";
+import { BOSTON_PROPERTIES } from "@/data/bostonProperties";
+import { MA_COUNTIES as maCountiesGeojson } from "@/data/maCounties";
+import type { Property } from "@/types";
+import type { FeatureCollection, Feature, Point, Polygon, MultiPolygon, LineString } from "geojson";
 
-const MarketPreview = lazy(() => import("./MarketPreview"));
+const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+const BOSTON_CENTER: [number, number] = [-71.10, 42.31];
+const BOSTON_ZOOM = 11.2;
 
-// CARTO GL vector tile style — gives us zoom-dependent labels:
-// zoomed out = continent names only, zoomed in = country names + borders
-const DARK_STYLE =
-  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
-
-export type ColorMode = "category" | "impact";
-
-interface WorldMapProps {
-  markets: ProcessedMarket[];
-  activeCategories: Set<Category>;
-  flyToTarget: { coords: [number, number]; marketId: string } | null;
-  timeRange: TimeRange;
-  onTimeRangeChange: (range: TimeRange) => void;
-  onToggleCategory: (category: Category) => void;
-  onToggleFullscreen: () => void;
-  isFullscreen: boolean;
-  onMarketClick?: (market: ProcessedMarket) => void;
-  onCountryClick?: (countryName: string) => void;
-  selectedCountry?: string | null;
-  selectedMarketId?: string | null;
-  colorMode?: ColorMode;
-  onColorModeChange?: (mode: ColorMode) => void;
-  region?: string | null;
-  onRegionChange?: (region: string) => void;
-  isWatched?: (id: string) => boolean;
-  onToggleWatch?: (id: string) => void;
-  newMarkets?: ProcessedMarket[];
-  whaleTrades?: WhaleTrade[];
-  activeLayers?: Set<OverlayLayer>;
-  onToggleLayer?: (layer: OverlayLayer) => void;
-  onTrade?: (state: import("./TradeModal").TradeModalState) => void;
-  onMapTap?: () => void;
-}
-
-// ─── 3-Tier Geographic Hierarchy ─────────────────────────────────
-// Tier 0 (zoom < 2.5): Continental — one bubble per continent/macro-region
-// Tier 1 (zoom 2.5–4): Country groups — large countries separate, small countries merge by sub-region
-// Tier 2 (zoom 4–6): Country-level — each country is its own bubble
-// Tier 3 (zoom > 6): Individual bubbles (offsetColocated only)
-
-const ZOOM_TIER_THRESHOLDS = [0];
-
-const CONTINENT_MAP: Record<string, string> = {
-  "United States": "Americas", Canada: "Americas", Mexico: "Americas",
-  Brazil: "Americas", Argentina: "Americas", Colombia: "Americas",
-  Chile: "Americas", Peru: "Americas", Venezuela: "Americas",
-  Ecuador: "Americas", Bolivia: "Americas", Uruguay: "Americas",
-  Paraguay: "Americas", Cuba: "Americas", "Costa Rica": "Americas",
-  Panama: "Americas", Guatemala: "Americas", Honduras: "Americas",
-  "El Salvador": "Americas", Nicaragua: "Americas",
-  "Dominican Republic": "Americas", "Puerto Rico": "Americas",
-  Jamaica: "Americas", "Trinidad and Tobago": "Americas",
-  "United Kingdom": "Europe", France: "Europe", Germany: "Europe",
-  Italy: "Europe", Spain: "Europe", Portugal: "Europe",
-  Netherlands: "Europe", Belgium: "Europe", Switzerland: "Europe",
-  Austria: "Europe", Sweden: "Europe", Norway: "Europe",
-  Denmark: "Europe", Finland: "Europe", Poland: "Europe",
-  Ireland: "Europe", "Czech Republic": "Europe", Czechia: "Europe",
-  Romania: "Europe", Greece: "Europe", Hungary: "Europe",
-  Ukraine: "Europe", Croatia: "Europe", Serbia: "Europe",
-  Bulgaria: "Europe", Slovakia: "Europe", Slovenia: "Europe",
-  Estonia: "Europe", Latvia: "Europe", Lithuania: "Europe",
-  Luxembourg: "Europe", Iceland: "Europe", Malta: "Europe",
-  Cyprus: "Europe", Albania: "Europe", "North Macedonia": "Europe",
-  Montenegro: "Europe", "Bosnia and Herzegovina": "Europe",
-  Moldova: "Europe", Belarus: "Europe", Georgia: "Europe",
-  Armenia: "Europe", Azerbaijan: "Europe",
-  China: "East Asia", Japan: "East Asia", "South Korea": "East Asia",
-  "Hong Kong": "East Asia", Mongolia: "East Asia",
-  India: "South Asia", Pakistan: "South Asia", Bangladesh: "South Asia",
-  "Sri Lanka": "South Asia", Nepal: "South Asia", Afghanistan: "South Asia",
-  Thailand: "SE Asia", Vietnam: "SE Asia", Indonesia: "SE Asia",
-  Philippines: "SE Asia", Singapore: "SE Asia", Malaysia: "SE Asia",
-  Myanmar: "SE Asia", Cambodia: "SE Asia", Laos: "SE Asia",
-  Israel: "Middle East", UAE: "Middle East",
-  "United Arab Emirates": "Middle East", "Saudi Arabia": "Middle East",
-  Turkey: "Middle East", Iran: "Middle East", Iraq: "Middle East",
-  Qatar: "Middle East", Kuwait: "Middle East", Bahrain: "Middle East",
-  Oman: "Middle East", Jordan: "Middle East", Lebanon: "Middle East",
-  Nigeria: "Africa", "South Africa": "Africa", Kenya: "Africa",
-  Egypt: "Africa", Ethiopia: "Africa", Ghana: "Africa",
-  Tanzania: "Africa", Morocco: "Africa", Algeria: "Africa",
-  Tunisia: "Africa", Uganda: "Africa", Senegal: "Africa",
-  Australia: "Oceania", "New Zealand": "Oceania",
-  Russia: "Russia/CIS", Kazakhstan: "Russia/CIS",
+const SERVICE_AREA: FeatureCollection<Polygon, { name: string }> = {
+  type: "FeatureCollection",
+  features: [
+    {
+      type: "Feature",
+      properties: { name: "TreeMap Service Area" },
+      geometry: {
+        type: "Polygon",
+        coordinates: [[
+          [-71.180, 42.367],
+          [-71.140, 42.376],
+          [-71.080, 42.378],
+          [-71.038, 42.348],
+          [-71.025, 42.310],
+          [-71.045, 42.268],
+          [-71.085, 42.240],
+          [-71.135, 42.230],
+          [-71.170, 42.250],
+          [-71.190, 42.285],
+          [-71.190, 42.330],
+          [-71.180, 42.367],
+        ]],
+      },
+    },
+  ],
 };
 
-// Tier 1: large countries stay separate, small countries merge by sub-region
-function getContinentByCoords(lat: number, lng: number): string {
-  if (lng > -170 && lng < -30 && lat > 15) return "Americas";
-  if (lng > -85 && lng < -30 && lat <= 15) return "Americas";
-  if (lng > -25 && lng < 45 && lat > 35) return "Europe";
-  if (lng > -20 && lng < 55 && lat >= -35 && lat <= 37) return "Africa";
-  if (lng >= 25 && lng < 65 && lat > 10 && lat < 45) return "Middle East";
-  if (lng >= 65 && lng < 150 && lat > 20) return "East Asia";
-  if (lng >= 95 && lng < 155 && lat >= -15 && lat <= 25) return "SE Asia";
-  if (lng >= 110 && lat < -10) return "Oceania";
-  if (lng >= 65 && lng < 95 && lat > 0 && lat <= 35) return "South Asia";
-  return "Other";
-}
+const NEIGHBORHOOD_PRESETS: { name: string; center: [number, number]; zoom: number }[] = [
+  { name: "All Boston", center: BOSTON_CENTER, zoom: BOSTON_ZOOM },
+  { name: "Jamaica Plain", center: [-71.114, 42.310], zoom: 13.5 },
+  { name: "Roslindale", center: [-71.130, 42.282], zoom: 13.5 },
+  { name: "West Roxbury", center: [-71.160, 42.280], zoom: 13.5 },
+  { name: "Hyde Park", center: [-71.130, 42.252], zoom: 13.5 },
+  { name: "Dorchester", center: [-71.070, 42.302], zoom: 13.5 },
+  { name: "Brighton", center: [-71.160, 42.350], zoom: 13.5 },
+  { name: "Allston", center: [-71.130, 42.350], zoom: 13.5 },
+];
 
-function getGroupKey(m: ProcessedMarket, tier: number): string {
-  if (!m.coords || !m.location) return m.id;
-  if (tier === 0) {
-    return CONTINENT_MAP[m.location] ?? getContinentByCoords(m.coords[0], m.coords[1]);
-  }
-  return m.id; // tier 1: individual
-}
+const PROPERTIES_SOURCE = "properties";
+const COUNTIES_SOURCE = "ma-counties";
+const SERVICE_SOURCE = "service-area";
 
-function snapToGroupCentroids(
-  markets: ProcessedMarket[],
-  groupKeyFn: (m: ProcessedMarket) => string,
-): ProcessedMarket[] {
-  const groups = new Map<string, { sumLat: number; sumLng: number; count: number }>();
-  for (const m of markets) {
-    if (!m.coords) continue;
-    const key = groupKeyFn(m);
-    const g = groups.get(key);
-    if (g) { g.sumLat += m.coords[0]; g.sumLng += m.coords[1]; g.count++; }
-    else groups.set(key, { sumLat: m.coords[0], sumLng: m.coords[1], count: 1 });
-  }
-  return markets.map((m) => {
-    if (!m.coords) return m;
-    const key = groupKeyFn(m);
-    const g = groups.get(key);
-    if (!g || g.count <= 1) return m;
-    return { ...m, coords: [g.sumLat / g.count, g.sumLng / g.count] as [number, number] };
-  });
-}
+const SERVICE_FILL_LAYER = "service-area-fill";
+const SERVICE_GLOW_LAYER = "service-area-glow";
+const SERVICE_OUTLINE_LAYER = "service-area-outline";
 
-function zoomToTier(zoom: number): number {
-  if (zoom < ZOOM_TIER_THRESHOLDS[0]) return 0;
-  return 1;
-}
+const HALO_LAYER = "properties-halo";
+const PIN_LAYER = "properties-pin";
+const PIN_LABEL_LAYER = "properties-label";
+const SELECTED_LAYER = "properties-selected";
+const ACTIVE_RING_LAYER = "properties-active-ring";
+const CLUSTER_LAYER = "properties-cluster";
+const CLUSTER_COUNT_LAYER = "properties-cluster-count";
 
-// Offset co-located markers using golden-angle spiral for organic non-overlapping layout.
-// Uses FIXED geographic offsets — zoom-in naturally separates bubbles via map projection.
-// No zoom dependency: avoids the "separate then collapse" problem of recalculating on zoom.
-function offsetColocated(markets: ProcessedMarket[]): ProcessedMarket[] {
-  // Group nearby markets using a grid with 0.5° cells
-  const cellSize = 0.5;
-  const groups = new Map<string, ProcessedMarket[]>();
-  for (const m of markets) {
-    if (!m.coords) continue;
-    const key = `${Math.floor(m.coords[0] / cellSize)},${Math.floor(m.coords[1] / cellSize)}`;
-    const arr = groups.get(key) || [];
-    arr.push(m);
-    groups.set(key, arr);
-  }
+const COUNTY_FILL_LAYER = "ma-counties-fill";
+const COUNTY_OUTLINE_LAYER = "ma-counties-outline";
 
-  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+const ROUTE_SOURCE = "crew-route";
+const ROUTE_LINE_LAYER = "crew-route-line";
+const ROUTE_GLOW_LAYER = "crew-route-glow";
+const ROUTE_NODE_LAYER = "crew-route-nodes";
 
-  const result: ProcessedMarket[] = [];
-  for (const m of markets) {
-    if (!m.coords) {
-      result.push(m);
-      continue;
-    }
-    const key = `${Math.floor(m.coords[0] / cellSize)},${Math.floor(m.coords[1] / cellSize)}`;
-    const group = groups.get(key)!;
-    if (group.length <= 1) {
-      result.push(m);
-      continue;
-    }
-    const idx = group.indexOf(m);
-    // Tighter spacing to keep bubbles near their country centroid.
-    const spacing = group.length > 50 ? 0.4 : group.length > 15 ? 0.3 : group.length > 5 ? 0.2 : 0.15;
-    // Start from idx+1 so first item is NOT at center (avoids pile-up at origin)
-    const n = idx + 1;
-    const angle = n * goldenAngle;
-    const r = spacing * Math.sqrt(n);
-    const offsetLat = r * Math.cos(angle);
-    const offsetLng = r * Math.sin(angle);
-    result.push({
-      ...m,
-      coords: [m.coords[0] + offsetLat, m.coords[1] + offsetLng] as [number, number],
-    });
-  }
-  return result;
-}
+const NDVI_HEAT_SOURCE = "ndvi-heat-source";
+const NDVI_HEAT_FILL_LAYER = "ndvi-heat-fill";
+const NDVI_HEAT_OUTLINE_LAYER = "ndvi-heat-outline";
 
-function setsEqual<T>(a?: Set<T>, b?: Set<T>): boolean {
-  if (a === b) return true;
-  if (!a || !b || a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
+const NDVI_BBOX = { minLng: -71.20, maxLng: -71.02, minLat: 42.22, maxLat: 42.39 };
+const NDVI_HEX_SIZE = 0.0045;
 
-// All overlay data is fetched via the local Next.js proxy (/api/overlay?layer=X)
-// which handles external API calls server-side, bypassing the browser CSP connect-src policy.
-async function fetchOverlayData(layer: OverlayLayer): Promise<GeoJSON.FeatureCollection> {
-  try {
-    const res = await fetch(`/api/overlay?layer=${layer}`);
-    if (!res.ok) throw new Error(`overlay proxy ${res.status}`);
-    return res.json() as Promise<GeoJSON.FeatureCollection>;
-  } catch (err) {
-    console.error(`[overlay] fetch failed for "${layer}":`, err);
-    return { type: "FeatureCollection", features: [] };
-  }
-}
+const STORM_TRACK_SOURCE = "storm-track";
+const STORM_HEAD_SOURCE = "storm-head";
+const STORM_TRACK_LAYER = "storm-track-line";
+const STORM_TRACK_GLOW_LAYER = "storm-track-glow";
+const STORM_HEAD_LAYER = "storm-head-pulse";
+const STORM_HEAD_CORE_LAYER = "storm-head-core";
 
-function WorldMapInner({
-  markets,
-  activeCategories,
-  flyToTarget,
-  timeRange,
-  onTimeRangeChange,
-  onToggleCategory,
-  onToggleFullscreen,
-  isFullscreen,
-  onMarketClick,
-  onCountryClick,
-  selectedCountry,
-  selectedMarketId,
-  colorMode = "category",
-  onColorModeChange,
-  region,
-  onRegionChange,
-  isWatched,
-  onToggleWatch,
-  newMarkets,
-  whaleTrades,
-  activeLayers,
-  onToggleLayer,
-  onTrade,
-  onMapTap,
-}: WorldMapProps) {
-  const { locale, t } = useI18n();
-  const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<maplibregl.Map | null>(null);
+const STORM_TRACK_COORDS: [number, number][] = [
+  [-71.30, 42.34],
+  [-71.22, 42.33],
+  [-71.14, 42.31],
+  [-71.07, 42.29],
+  [-70.99, 42.27],
+  [-70.92, 42.26],
+];
 
-  const [mapReady, setMapReady] = useState(false);
-  const [currentTier, setCurrentTier] = useState(() => zoomToTier(1.2));
-  const marketsLookup = useRef<Map<string, ProcessedMarket>>(new Map());
-  const countryLayersAdded = useRef(false);
-  const pulseRef = useRef<number>(0);
+type PropertyFeatureProps = {
+  id: string;
+  address: string;
+  ownerName: string;
+  neighborhood: string;
+  treeCount: number;
+  urgencyScore: number;
+  ndviScore: number;
+  stormProximityMiles: number;
+  zipCode: string;
+  city: string;
+  mailReady: boolean;
+};
 
-  const newMarketAnimRef = useRef<Map<string, { startTime: number; lng: number; lat: number }>>(new Map());
-
-  const tradeFlashesRef = useRef<{ key: string; lng: number; lat: number; startTime: number; side: "BUY" | "SELL"; isSmart: boolean }[]>([]);
-  const seenTradeKeysRef = useRef<Set<string>>(new Set());
-  const prevMarketIdsRef = useRef<Map<string, { lng: number; lat: number; color: string }>>(new Map());
-  const prevTierRef = useRef<number>(0);
-  const closedAnimsRef = useRef<Map<string, { startTime: number; lng: number; lat: number; color: string }>>(new Map());
-  const reducedMotionCleanup = useRef<(() => void) | null>(null);
-  const overlayFetched = useRef<Set<OverlayLayer>>(new Set());
-  const overlayBurstRef = useRef<{ lng: number; lat: number; startTime: number; color: string }[]>([]);
-  const [layerAlert, setLayerAlert] = useState<{ emoji: string; label: string; count: number; color: string } | null>(null);
-  const layerAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const OVERLAY_META: Partial<Record<OverlayLayer, { emoji: string; label: string; color: string }>> = {
-    conflicts:  { emoji: "💥", label: "conflict zones",   color: "#ef4444" },
-    intel:      { emoji: "🔍", label: "intel hotspots",   color: "#a855f7" },
-    military:   { emoji: "✈️",  label: "military flights", color: "#22d3ee" },
-    weather:    { emoji: "🌩️", label: "weather alerts",   color: "#f59e0b" },
-    natural:    { emoji: "🌍", label: "natural events",   color: "#f97316" },
-    fires:      { emoji: "🔥", label: "fires",            color: "#ff6b35" },
-    elections:  { emoji: "🗳️", label: "elections",        color: "#fbbf24" },
-    outages:    { emoji: "📡", label: "internet outages", color: "#e879f9" },
-    protests:   { emoji: "✊", label: "protests / unrest",color: "#fb7185" },
-    soccer:     { emoji: "⚽", label: "soccer",           color: "#10b981" },
-    basketball: { emoji: "🏀", label: "basketball",       color: "#f97316" },
-    baseball:   { emoji: "⚾", label: "baseball",         color: "#ef4444" },
-    hockey:     { emoji: "🏒", label: "ice hockey",       color: "#38bdf8" },
-    tennis:     { emoji: "🎾", label: "tennis",           color: "#a3e635" },
-    golf:       { emoji: "⛳", label: "golf",             color: "#4ade80" },
-    combat:     { emoji: "🥊", label: "boxing / MMA",     color: "#f43f5e" },
+function propertiesToFeatureCollection(
+  properties: Property[],
+): FeatureCollection<Point, PropertyFeatureProps> {
+  return {
+    type: "FeatureCollection",
+    features: properties.map<Feature<Point, PropertyFeatureProps>>((p) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+      properties: {
+        id: p.id,
+        address: p.address,
+        ownerName: p.ownerName,
+        neighborhood: p.neighborhood,
+        treeCount: p.treeCount,
+        urgencyScore: p.urgencyScore,
+        ndviScore: p.ndviScore,
+        stormProximityMiles: p.stormProximityMiles,
+        zipCode: p.zipCode,
+        city: p.city,
+        mailReady: p.mailReady,
+      },
+    })),
   };
+}
 
-  // Hover preview popup state
-  const [hoverMarket, setHoverMarket] = useState<ProcessedMarket | null>(null);
-  const [hoverPos, setHoverPos] = useState<{ top?: number; bottom?: number; left: number } | null>(null);
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hoverMarketRef = useRef<ProcessedMarket | null>(null);
-  hoverMarketRef.current = hoverMarket;
-  const selectedMarketIdRef = useRef(selectedMarketId);
-  selectedMarketIdRef.current = selectedMarketId;
+function buildPinFilter(
+  filterNeighborhood: string | null,
+  filterMinUrgency: number,
+): maplibregl.FilterSpecification {
+  const clauses: maplibregl.FilterSpecification[] = [["!", ["has", "point_count"]]];
+  if (filterNeighborhood) {
+    clauses.push(["==", ["get", "neighborhood"], filterNeighborhood]);
+  }
+  if (filterMinUrgency > 0) {
+    clauses.push([">=", ["get", "urgencyScore"], filterMinUrgency]);
+  }
+  return ["all", ...clauses] as maplibregl.FilterSpecification;
+}
 
-  // Country hover popup state
-  const [hoverCountry, setHoverCountry] = useState<{ name: string; x: number; y: number } | null>(null);
-  const countryHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+const URGENCY_COLOR_EXPR: maplibregl.ExpressionSpecification = [
+  "case",
+  [">", ["get", "urgencyScore"], 70],
+  "#ef4444",
+  [">=", ["get", "urgencyScore"], 40],
+  "#f59e0b",
+  "#22c55e",
+];
 
-  // Overlay layer hover tooltip state
-  const [hoverOverlay, setHoverOverlay] = useState<{
-    layerId: string;
-    color: string;
-    title: string;
-    rows: { label: string; value: string }[];
-    x: number;
-    y: number;
-  } | null>(null);
+const TREE_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
+  "interpolate", ["linear"], ["zoom"],
+  9, ["case", [">=", ["get", "treeCount"], 5], 7, [">=", ["get", "treeCount"], 3], 5, 4],
+  12, ["case", [">=", ["get", "treeCount"], 5], 14, [">=", ["get", "treeCount"], 3], 10, 7],
+  15, ["case", [">=", ["get", "treeCount"], 5], 20, [">=", ["get", "treeCount"], 3], 15, 11],
+];
 
-  const isMobile = typeof window !== "undefined" && window.innerWidth <= 768;
-  const PREVIEW_W = isMobile ? Math.min(300, window.innerWidth - 16) : 480;
-  const PREVIEW_MAX_H = isMobile ? 360 : 520;
+const HALO_RADIUS_EXPR: maplibregl.ExpressionSpecification = [
+  "interpolate", ["linear"], ["zoom"],
+  9, ["case", [">=", ["get", "treeCount"], 5], 14, [">=", ["get", "treeCount"], 3], 11, 9],
+  12, ["case", [">=", ["get", "treeCount"], 5], 26, [">=", ["get", "treeCount"], 3], 20, 15],
+  15, ["case", [">=", ["get", "treeCount"], 5], 36, [">=", ["get", "treeCount"], 3], 28, 22],
+];
 
-  const clearHoverPopup = useCallback(() => {
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = null;
-    setHoverMarket(null);
-    setHoverPos(null);
-  }, []);
-
-  const applySelectedCountryHighlight = useCallback((map: maplibregl.Map) => {
-    const TOPO_NAME: Record<string, string> = {
-      "United States": "United States of America",
-      "Bosnia": "Bosnia and Herz.",
-      "Bosnia and Herzegovina": "Bosnia and Herz.",
-      "Czech Republic": "Czechia",
-    };
-    // Countries that should highlight multiple regions together
-    const TOPO_GROUP: Record<string, string[]> = {
-      "China": ["China", "Taiwan"],
-      "Taiwan": ["China", "Taiwan"],
-    };
-    const topoNames = selectedCountry
-      ? (TOPO_GROUP[selectedCountry] || [TOPO_NAME[selectedCountry] || selectedCountry])
-      : [];
-    const filter = topoNames.length > 0
-      ? ["in", ["get", "name"], ["literal", topoNames]] as maplibregl.FilterSpecification
-      : ["==", ["get", "name"], ""] as maplibregl.FilterSpecification;
-    if (map.getLayer("country-selected")) {
-      map.setFilter("country-selected", filter);
+function computeRouteCoords(props: Property[]): [number, number][] {
+  if (props.length === 0) return [];
+  if (props.length === 1) return [[props[0].lng, props[0].lat]];
+  // Centroid
+  let cx = 0;
+  let cy = 0;
+  for (const p of props) {
+    cx += p.lng;
+    cy += p.lat;
+  }
+  cx /= props.length;
+  cy /= props.length;
+  // Start from property closest to centroid.
+  let startIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < props.length; i++) {
+    const d = Math.hypot(props[i].lng - cx, props[i].lat - cy);
+    if (d < bestDist) {
+      bestDist = d;
+      startIdx = i;
     }
-    if (map.getLayer("country-selected-border")) {
-      map.setFilter("country-selected-border", filter);
+  }
+  const visited = new Set<number>();
+  const order: number[] = [startIdx];
+  visited.add(startIdx);
+  while (order.length < props.length) {
+    const last = props[order[order.length - 1]];
+    let nextIdx = -1;
+    let nextDist = Infinity;
+    for (let i = 0; i < props.length; i++) {
+      if (visited.has(i)) continue;
+      const d = Math.hypot(props[i].lng - last.lng, props[i].lat - last.lat);
+      if (d < nextDist) {
+        nextDist = d;
+        nextIdx = i;
+      }
     }
-  }, [selectedCountry]);
+    if (nextIdx === -1) break;
+    order.push(nextIdx);
+    visited.add(nextIdx);
+  }
+  return order.map<[number, number]>((i) => [props[i].lng, props[i].lat]);
+}
 
-  // Initialize map with CARTO vector tiles
+function buildRouteFeatures(
+  coords: [number, number][],
+): FeatureCollection<LineString | Point, { kind: "line" | "node" }> {
+  const features: Feature<LineString | Point, { kind: "line" | "node" }>[] = [];
+  if (coords.length >= 2) {
+    features.push({
+      type: "Feature",
+      properties: { kind: "line" },
+      geometry: { type: "LineString", coordinates: coords },
+    });
+  }
+  for (const c of coords) {
+    features.push({
+      type: "Feature",
+      properties: { kind: "node" },
+      geometry: { type: "Point", coordinates: c },
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+function buildHexFeature(
+  cx: number,
+  cy: number,
+  s: number,
+  stress: number,
+): Feature<Polygon, { stress: number }> {
+  const vertices: [number, number][] = [];
+  for (let k = 0; k < 6; k++) {
+    const ang = (Math.PI / 3) * k;
+    vertices.push([cx + s * Math.cos(ang), cy + s * Math.sin(ang)]);
+  }
+  vertices.push(vertices[0]);
+  return {
+    type: "Feature",
+    properties: { stress },
+    geometry: { type: "Polygon", coordinates: [vertices] },
+  };
+}
+
+function buildNdviHeatFeatures(
+  props: Property[],
+): FeatureCollection<Polygon, { stress: number }> {
+  const s = NDVI_HEX_SIZE;
+  const stepX = 1.5 * s;
+  const stepY = Math.sqrt(3) * s;
+  const offsetY = (Math.sqrt(3) / 2) * s;
+  const features: Feature<Polygon, { stress: number }>[] = [];
+  let col = 0;
+  for (let cx = NDVI_BBOX.minLng; cx <= NDVI_BBOX.maxLng + stepX; cx += stepX) {
+    const yOffset = col % 2 === 0 ? 0 : offsetY;
+    for (let cy = NDVI_BBOX.minLat + yOffset; cy <= NDVI_BBOX.maxLat + stepY; cy += stepY) {
+      // Find props within this hex's circumscribed circle (cheap filter).
+      let sum = 0;
+      let n = 0;
+      for (const p of props) {
+        if (Math.hypot(p.lng - cx, p.lat - cy) <= s) {
+          sum += 100 - p.ndviScore;
+          n++;
+        }
+      }
+      if (n > 0) {
+        features.push(buildHexFeature(cx, cy, s, sum / n));
+      }
+    }
+    col++;
+  }
+  return { type: "FeatureCollection", features };
+}
+
+function renderMapFallback(reason?: string): string {
+  const subtitle = reason ?? "Your browser blocked WebGL. The dashboard works fully — only the map view is hidden.";
+  return `
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at center, #1a1a1a 0%, #0a0a0a 70%);font-family:Inter,sans-serif;text-align:center;padding:32px;z-index:1">
+      <div style="max-width:520px">
+        <div style="font-size:56px;margin-bottom:16px">🌍</div>
+        <div style="font-size:20px;font-weight:700;color:#f0f0f0;margin-bottom:12px;letter-spacing:-0.01em">Map can't render</div>
+        <div style="font-size:14px;color:#a0a0a0;line-height:1.6;margin-bottom:20px">${subtitle}</div>
+        <div style="font-size:12px;color:#6a6a6a;text-align:left;background:rgba(255,255,255,0.04);border:1px solid #2a2a2a;border-radius:8px;padding:14px 16px;line-height:1.7">
+          <div style="font-weight:600;color:#22c55e;margin-bottom:6px;letter-spacing:0.04em;text-transform:uppercase;font-size:10px">How to fix</div>
+          Chrome &rarr; Settings &rarr; System &rarr; enable<br/><strong style="color:#f0f0f0">"Use hardware acceleration when available"</strong><br/>then restart browser.<br/>Or open <code style="background:#000;padding:1px 5px;border-radius:3px;color:#f59e0b">chrome://gpu</code> to check WebGL status.
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+export function WorldMap() {
+  const mapContainer = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const styleReadyRef = useRef(false);
+  const pulseIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeRingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stormAnimRef = useRef<number | null>(null);
+  const routeDashIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const properties = useLeadStore((s) => s.properties);
+  const selectedIds = useLeadStore((s) => s.selectedIds);
+  const filterNeighborhood = useLeadStore((s) => s.filterNeighborhood);
+  const filterMinUrgency = useLeadStore((s) => s.filterMinUrgency);
+  const activePropertyId = useLeadStore((s) => s.activePropertyId);
+  const flyToTarget = useLeadStore((s) => s.flyToTarget);
+
+  const activeCountyFilter = useAlertStore((s) => s.activeCountyFilter);
+
+  // Seed store from bundled data on first mount if empty.
   useEffect(() => {
-    if (!mapContainer.current || mapRef.current) return;
-
-    const map = new maplibregl.Map({
-      container: mapContainer.current,
-      style: DARK_STYLE,
-      center: [10, 25],
-      zoom: 1.2,
-      minZoom: 1.2,
-      maxZoom: 10,
-      attributionControl: false,
-      renderWorldCopies: false,
-      maxPitch: 0,
-      pitchWithRotate: false,
-      dragRotate: false,
-    });
-
-    // Two-finger trackpad swipe → pan; pinch (ctrlKey) → zoom
-    // Browsers report pinch as wheel events with ctrlKey=true
-    map.scrollZoom.disable();
-    const canvas = map.getCanvasContainer();
-    const wheelHandler = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        // Pinch gesture → zoom
-        e.preventDefault();
-        const zoom = map.getZoom();
-        const delta = -e.deltaY * 0.02;
-        const around = map.unproject(new maplibregl.Point(e.offsetX, e.offsetY));
-        map.easeTo({ zoom: zoom + delta, around, duration: 0 });
-      } else {
-        // Two-finger swipe → pan
-        e.preventDefault();
-        map.panBy([e.deltaX, e.deltaY], { duration: 0 });
-      }
-    };
-    canvas.addEventListener("wheel", wheelHandler, { passive: false });
-
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
-
-    // Track zoom tier changes for 2-tier clustering
-    map.on("zoom", () => {
-      const newTier = zoomToTier(map.getZoom());
-      setCurrentTier((prev) => (prev !== newTier ? newTier : prev));
-    });
-
-    map.on("style.load", () => {
-      // Find the first symbol (label) layer so we can insert market layers below it
-      const labelLayerId = map.getStyle().layers?.find(
-        (l) => l.type === "symbol" && (l as { layout?: { "text-field"?: unknown } }).layout?.["text-field"]
-      )?.id;
-      generateShapeIcons(map);
-      generateMarketEmojiIcons(map);
-      try { addOverlayLayers(map, labelLayerId); } catch (e) { console.error("[overlay] addOverlayLayers failed:", e); }
-      addMarketLayers(map, labelLayerId);
-      addCountryInteraction(map);
-
-      // Enhance country/continent labels so they stay readable over bubbles
-      for (const id of ["place_country_1", "place_country_2", "place_continent"]) {
-        if (map.getLayer(id)) {
-          map.setPaintProperty(id, "text-halo-width", 2);
-          map.setPaintProperty(id, "text-halo-color", "rgba(0,0,0,0.85)");
-        }
-      }
-
-      mapRef.current = map;
-      setMapReady(true);
-
-      // Animated signal pulse + selected ring + beacon + anomaly glow + new market rings + trade flashes
-      const reducedMotionMq = window.matchMedia('(prefers-reduced-motion: reduce)');
-      let prefersReducedMotion = reducedMotionMq.matches;
-      const onMotionChange = (e: MediaQueryListEvent) => { prefersReducedMotion = e.matches; };
-      reducedMotionMq.addEventListener('change', onMotionChange);
-      reducedMotionCleanup.current = () => reducedMotionMq.removeEventListener('change', onMotionChange);
-
-      let phase = 0;
-      const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
-      // Only call setPaintProperty when the value has changed enough to matter visually.
-      // This prevents MapLibre from scheduling a GPU redraw every single frame.
-      const PAINT_THRESHOLD = 0.004;
-      const prev: Record<string, number> = {};
-      const setPaint = (layerId: string, prop: string, val: number) => {
-        const key = `${layerId}:${prop}`;
-        if (Math.abs((prev[key] ?? -1) - val) < PAINT_THRESHOLD) return;
-        prev[key] = val;
-        map.setPaintProperty(layerId, prop, val);
-      };
-
-      const animatePulse = () => {
-        if (prefersReducedMotion || document.hidden) {
-          // Stop RAF loop when hidden — visibilitychange listener restarts it
-          return;
-        }
-        phase = (phase + 0.04) % (2 * Math.PI);
-        const sin = Math.sin(phase);
-        const zoom = map.getZoom();
-        // Skip setPaint for layers not visible at current zoom
-        if (zoom >= 2) {
-          if (map.getLayer("signal-glow")) {
-            setPaint("signal-glow", "circle-opacity", clamp01(0.15 + 0.1 * sin));
-          }
-          if (map.getLayer("signal-pulse-ring")) {
-            setPaint("signal-pulse-ring", "circle-stroke-opacity", clamp01(0.08 + 0.06 * Math.sin(phase * 0.7)));
-          }
-          if (map.getLayer("selected-ring")) {
-            setPaint("selected-ring", "circle-stroke-opacity", clamp01(0.5 + 0.3 * sin));
-            setPaint("selected-ring", "circle-opacity", clamp01(0.08 + 0.04 * sin));
-          }
-          if (map.getLayer("selected-beacon")) {
-            setPaint("selected-beacon", "circle-stroke-opacity", clamp01(0.10 + 0.08 * Math.sin(phase * 0.5)));
-          }
-          if (map.getLayer("anomaly-glow")) {
-            setPaint("anomaly-glow", "circle-opacity", clamp01(0.08 + 0.06 * Math.sin(phase * 1.2)));
-          }
-        }
-        if (zoom >= 3 && map.getLayer("market-breathe-glow")) {
-          const breathe = 0.10 + 0.06 * Math.sin(phase * 0.5);
-          setPaint("market-breathe-glow", "circle-opacity", clamp01(breathe));
-        }
-
-        // Feature 2: new market appearance animations
-        const now = performance.now();
-        const newAnims = newMarketAnimRef.current;
-        if (newAnims.size > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const nmFeatures: any[] = [];
-          const DURATION = 2000;
-          for (const [id, anim] of newAnims) {
-            const elapsed = now - anim.startTime;
-            if (elapsed > DURATION) { newAnims.delete(id); continue; }
-            const t = elapsed / DURATION;
-
-            // Phase 1 (0–0.25): pop-in — core expands from 0, ring bursts out
-            // Phase 2 (0.25–1.0): ring fades, core settles
-            let ringR: number, strokeW: number, coreR: number, opacity: number, glowR: number, glowOp: number, coreOp: number;
-            if (t < 0.25) {
-              const p = t / 0.25;
-              const ease = 1 - Math.pow(1 - p, 3); // ease-out
-              ringR = ease * 22;
-              strokeW = 1.5 + ease;
-              coreR = ease * 6;
-              opacity = ease * 0.9;
-              glowR = ease * 30;
-              glowOp = ease * 0.25;
-              coreOp = ease;
-            } else {
-              const p = (t - 0.25) / 0.75;
-              const ease = 1 - Math.pow(1 - p, 2);
-              ringR = 22 + ease * 8;
-              strokeW = 2.5 * (1 - ease * 0.6);
-              coreR = 6 * (1 - ease);
-              opacity = 0.9 * (1 - ease);
-              glowR = 30 * (1 - ease * 0.5);
-              glowOp = 0.25 * (1 - ease);
-              coreOp = 1.0 * (1 - ease);
-            }
-
-            nmFeatures.push({
-              type: "Feature",
-              geometry: { type: "Point", coordinates: [anim.lng, anim.lat] },
-              properties: {
-                radius: Math.max(0, ringR),
-                strokeWidth: Math.max(0, strokeW),
-                opacity: clamp01(opacity),
-                glowRadius: Math.max(0, glowR),
-                glowOpacity: clamp01(glowOp),
-                coreRadius: Math.max(0, coreR),
-                coreOpacity: clamp01(coreOp),
-              },
-            });
-          }
-          const nmSrc = map.getSource("new-market-rings") as maplibregl.GeoJSONSource;
-          if (nmSrc) nmSrc.setData({ type: "FeatureCollection", features: nmFeatures });
-        }
-
-        // Feature 4: trade flash animations
-        const flashes = tradeFlashesRef.current;
-        if (flashes.length > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const tfFeatures: any[] = [];
-          const remaining: typeof flashes = [];
-          for (const flash of flashes) {
-            const elapsed = now - flash.startTime;
-            const duration = flash.isSmart ? 2000 : 1500;
-            if (elapsed > duration) continue;
-            remaining.push(flash);
-            const t = elapsed / duration;
-            const ease = 1 - Math.pow(1 - t, 3);
-            const maxR = flash.isSmart ? 30 : 20;
-            const r = 4 + ease * (maxR - 4);
-            const op = 0.8 * (1 - t);
-            const color = flash.side === "BUY" ? "#22c55e" : "#ff4444";
-            tfFeatures.push({
-              type: "Feature",
-              geometry: { type: "Point", coordinates: [flash.lng, flash.lat] },
-              properties: { radius: r, opacity: op, color, strokeWidth: flash.isSmart ? 2.5 : 1.5, glowRadius: r * 1.4, glowOpacity: op * 0.3 },
-            });
-          }
-          tradeFlashesRef.current = remaining;
-          const tfSrc = map.getSource("trade-flashes") as maplibregl.GeoJSONSource;
-          if (tfSrc) tfSrc.setData({ type: "FeatureCollection", features: tfFeatures });
-        }
-
-        // Overlay event burst animations (ripple rings on layer load)
-        const bursts = overlayBurstRef.current;
-        if (bursts.length > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const burstFeatures: any[] = [];
-          const BDUR = 1600;
-          overlayBurstRef.current = bursts.filter((b) => {
-            const elapsed = now - b.startTime;
-            if (elapsed < 0) { burstFeatures.push(null); return true; } // not started yet
-            if (elapsed > BDUR) return false;
-            const t = elapsed / BDUR;
-            const ease = 1 - Math.pow(1 - t, 2);
-            burstFeatures.push({
-              type: "Feature",
-              geometry: { type: "Point", coordinates: [b.lng, b.lat] },
-              properties: {
-                radius: 3 + ease * 30,
-                opacity: clamp01(0.85 * (1 - t)),
-                strokeWidth: 1.5 * (1 - t * 0.5),
-                color: b.color,
-              },
-            });
-            return true;
-          });
-          const bSrc = map.getSource("overlay-burst") as maplibregl.GeoJSONSource | undefined;
-          if (bSrc) bSrc.setData({ type: "FeatureCollection", features: burstFeatures.filter(Boolean) });
-        }
-
-        // Closed market cross-star collapse animations
-        const closedAnims = closedAnimsRef.current;
-        if (closedAnims.size > 0) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const cmFeatures: any[] = [];
-          const DURATION = 1800;
-          for (const [id, anim] of closedAnims) {
-            const elapsed = now - anim.startTime;
-            if (elapsed > DURATION) { closedAnims.delete(id); continue; }
-            const t = elapsed / DURATION;
-
-            // Phase 1 (0–0.3): cross-star expands outward with bright flash
-            // Phase 2 (0.3–1.0): collapses inward and fades
-            let ringR: number, strokeW: number, coreR: number, opacity: number, glowR: number, glowOp: number, coreOp: number;
-            if (t < 0.3) {
-              const p = t / 0.3;
-              const ease = 1 - Math.pow(1 - p, 2);
-              ringR = 4 + ease * 24;
-              strokeW = 2 + ease * 1.5;
-              coreR = 3 + ease * 5;
-              opacity = 0.4 + ease * 0.6;
-              glowR = ringR * 1.8;
-              glowOp = 0.3 + ease * 0.3;
-              coreOp = 0.8 + ease * 0.2;
-            } else {
-              const p = (t - 0.3) / 0.7;
-              const ease = p * p; // ease-in for collapse
-              ringR = 28 * (1 - ease);
-              strokeW = 3.5 * (1 - ease * 0.5);
-              coreR = 8 * (1 - ease);
-              opacity = 1.0 * (1 - ease);
-              glowR = ringR * 1.8;
-              glowOp = 0.6 * (1 - ease);
-              coreOp = 1.0 * (1 - ease);
-            }
-
-            cmFeatures.push({
-              type: "Feature",
-              geometry: { type: "Point", coordinates: [anim.lng, anim.lat] },
-              properties: {
-                radius: Math.max(0, ringR),
-                strokeWidth: Math.max(0, strokeW),
-                opacity: clamp01(opacity),
-                color: anim.color,
-                glowRadius: Math.max(0, glowR),
-                glowOpacity: clamp01(glowOp),
-                coreRadius: Math.max(0, coreR),
-                coreOpacity: clamp01(coreOp),
-              },
-            });
-          }
-          const cmSrc = map.getSource("closed-market-anims") as maplibregl.GeoJSONSource;
-          if (cmSrc) cmSrc.setData({ type: "FeatureCollection", features: cmFeatures });
-        }
-
-        pulseRef.current = requestAnimationFrame(animatePulse);
-      };
-      pulseRef.current = requestAnimationFrame(animatePulse);
-
-      // Restart RAF loop when tab becomes visible again
-      const onVisChange = () => {
-        if (!document.hidden) {
-          cancelAnimationFrame(pulseRef.current);
-          pulseRef.current = requestAnimationFrame(animatePulse);
-        }
-      };
-      document.addEventListener("visibilitychange", onVisChange);
-      map.once("remove", () => document.removeEventListener("visibilitychange", onVisChange));
-    });
-
-    return () => {
-      canvas.removeEventListener("wheel", wheelHandler);
-      cancelAnimationFrame(pulseRef.current);
-      reducedMotionCleanup.current?.();
-      map.remove();
-      mapRef.current = null;
-      countryLayersAdded.current = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const state = useLeadStore.getState();
+    if (state.properties.length === 0 && BOSTON_PROPERTIES.length > 0) {
+      state.setProperties(BOSTON_PROPERTIES);
+    }
   }, []);
 
-  // Generate SDF shape icons for category-shaped markers
-  function generateShapeIcons(map: maplibregl.Map) {
-    // 64px canvas with pixelRatio:2 → 32 logical px, crisp on retina
-    const size = 64;
-    const cx = size / 2;
-    const cy = size / 2;
-    const R = 28; // shape radius (2× of previous 14)
+  // Initialize map once.
+  useEffect(() => {
+    if (mapRef.current || !mapContainer.current) return;
 
-    const shapes: Record<string, (ctx: CanvasRenderingContext2D) => void> = {
-      circle: (ctx) => {
-        ctx.arc(cx, cy, R, 0, Math.PI * 2);
-      },
-      star: (ctx) => {
-        const outerR = R, innerR = 12, points = 5;
-        for (let i = 0; i < points * 2; i++) {
-          const r = i % 2 === 0 ? outerR : innerR;
-          const angle = (Math.PI / 2) * -1 + (Math.PI / points) * i;
-          const method = i === 0 ? "moveTo" : "lineTo";
-          ctx[method](cx + r * Math.cos(angle), cy + r * Math.sin(angle));
-        }
-        ctx.closePath();
-      },
-      diamond: (ctx) => {
-        ctx.moveTo(cx, cy - R);
-        ctx.lineTo(cx + 22, cy);
-        ctx.lineTo(cx, cy + R);
-        ctx.lineTo(cx - 22, cy);
-        ctx.closePath();
-      },
-      triangle: (ctx) => {
-        ctx.moveTo(cx, cy - R);
-        ctx.lineTo(cx + R * Math.cos(Math.PI / 6), cy + R * Math.sin(Math.PI / 6));
-        ctx.lineTo(cx - R * Math.cos(Math.PI / 6), cy + R * Math.sin(Math.PI / 6));
-        ctx.closePath();
-      },
-      hexagon: (ctx) => {
-        for (let i = 0; i < 6; i++) {
-          const angle = (Math.PI / 3) * i - Math.PI / 6;
-          const method = i === 0 ? "moveTo" : "lineTo";
-          ctx[method](cx + R * Math.cos(angle), cy + R * Math.sin(angle));
-        }
-        ctx.closePath();
-      },
-      pentagon: (ctx) => {
-        for (let i = 0; i < 5; i++) {
-          const angle = (Math.PI * 2 / 5) * i - Math.PI / 2;
-          const method = i === 0 ? "moveTo" : "lineTo";
-          ctx[method](cx + R * Math.cos(angle), cy + R * Math.sin(angle));
-        }
-        ctx.closePath();
-      },
-      square: (ctx) => {
-        const r = 4, s = 24;
-        ctx.moveTo(cx - s + r, cy - s);
-        ctx.lineTo(cx + s - r, cy - s);
-        ctx.arcTo(cx + s, cy - s, cx + s, cy - s + r, r);
-        ctx.lineTo(cx + s, cy + s - r);
-        ctx.arcTo(cx + s, cy + s, cx + s - r, cy + s, r);
-        ctx.lineTo(cx - s + r, cy + s);
-        ctx.arcTo(cx - s, cy + s, cx - s, cy + s - r, r);
-        ctx.lineTo(cx - s, cy - s + r);
-        ctx.arcTo(cx - s, cy - s, cx - s + r, cy - s, r);
-        ctx.closePath();
-      },
-    };
-
-    // Pre-generate colored icons for every color × shape combo (non-SDF)
-    const allColors = [
-      ...Object.values(CATEGORY_COLORS),
-      ...Object.values(IMPACT_COLORS),
-    ];
-    const uniqueColors = [...new Set(allColors)];
-
-    for (const [shapeName, draw] of Object.entries(shapes)) {
-      for (const color of uniqueColors) {
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d")!;
-
-        // Colored fill
-        ctx.beginPath();
-        draw(ctx);
-        ctx.fillStyle = color;
-        ctx.globalAlpha = 0.85;
-        ctx.fill();
-
-        // Dark outline on top — visible against the colored fill
-        ctx.globalAlpha = 1;
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = "rgba(0, 0, 0, 0.5)";
-        ctx.stroke();
-
-        const imageData = ctx.getImageData(0, 0, size, size);
-        const key = `icon-${color.replace("#", "")}-${shapeName}`;
-        map.addImage(key, imageData, { sdf: false, pixelRatio: 2 });
+    let map: maplibregl.Map;
+    try {
+      map = new maplibregl.Map({
+        container: mapContainer.current,
+        style: MAP_STYLE,
+        center: [0, 20],
+        zoom: 1.2,
+        pitch: 0,
+        bearing: 0,
+        attributionControl: { compact: true },
+        dragRotate: false,
+        pitchWithRotate: false,
+        touchPitch: false,
+      });
+    } catch (err) {
+      console.warn("[WorldMap] WebGL init failed — rendering fallback.", err);
+      if (mapContainer.current) {
+        mapContainer.current.innerHTML = renderMapFallback();
       }
+      return;
     }
-  }
 
-  // Rasterize an emoji string onto a canvas and return raw RGBA data for map.addImage()
-  function emojiToSprite(emoji: string, size = 24): { width: number; height: number; data: Uint8Array } {
-    const canvas = document.createElement("canvas");
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext("2d")!;
-    ctx.clearRect(0, 0, size, size);
-    ctx.font = `${Math.round(size * 0.72)}px serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(emoji, size / 2, size / 2 + 1);
-    const imgData = ctx.getImageData(0, 0, size, size);
-    return { width: size, height: size, data: new Uint8Array(imgData.data.buffer) };
-  }
+    mapRef.current = map;
 
-  function generateMarketEmojiIcons(map: maplibregl.Map) {
-    // Category emojis
-    for (const [cat, emoji] of Object.entries(CATEGORY_EMOJI)) {
-      const key = `market-emoji-${cat}`;
-      if (map.hasImage(key)) continue;
-      const sprite = emojiToSprite(emoji, 48);
-      map.addImage(key, sprite, { sdf: false, pixelRatio: 2 });
-    }
-    // Sub-category emojis (keyed by emoji itself)
-    for (const emoji of ALL_SUB_EMOJIS) {
-      const key = `market-sub-${emoji}`;
-      if (map.hasImage(key)) continue;
-      const sprite = emojiToSprite(emoji, 48);
-      map.addImage(key, sprite, { sdf: false, pixelRatio: 2 });
-    }
-  }
-
-  // Add overlay GeoJSON sources + emoji sprite layers (all hidden initially)
-  function addOverlayLayers(map: maplibregl.Map, beforeId?: string) {
-    const configs: { id: OverlayLayer; color: string; glowR: number; emoji: string }[] = [
-      { id: "conflicts",  color: "#ef4444", glowR: 28, emoji: "💥" },
-      { id: "intel",      color: "#a855f7", glowR: 22, emoji: "🔍" },
-      { id: "military",   color: "#22d3ee", glowR: 16, emoji: "✈️" },
-      { id: "weather",    color: "#f59e0b", glowR: 26, emoji: "🌩️" },
-      { id: "natural",    color: "#f97316", glowR: 26, emoji: "🌍" },
-      { id: "fires",      color: "#ff6b35", glowR: 20, emoji: "🔥" },
-      { id: "elections",  color: "#fbbf24", glowR: 24, emoji: "🗳️" },
-      { id: "outages",    color: "#e879f9", glowR: 26, emoji: "📡" },
-      { id: "protests",   color: "#fb7185", glowR: 22, emoji: "✊" },
-      { id: "soccer",     color: "#10b981", glowR: 22, emoji: "⚽" },
-      { id: "basketball", color: "#f97316", glowR: 22, emoji: "🏀" },
-      { id: "baseball",   color: "#ef4444", glowR: 20, emoji: "⚾" },
-      { id: "hockey",     color: "#38bdf8", glowR: 20, emoji: "🏒" },
-      { id: "tennis",     color: "#a3e635", glowR: 18, emoji: "🎾" },
-      { id: "golf",       color: "#4ade80", glowR: 18, emoji: "⛳" },
-      { id: "combat",     color: "#f43f5e", glowR: 22, emoji: "🥊" },
-    ];
-
-    const add = (layer: Parameters<typeof map.addLayer>[0]) => map.addLayer(layer, beforeId);
-
-    for (const { id, color, glowR, emoji } of configs) {
-      // Register the emoji as a map image sprite so icon-image can render it in full color
-      const spriteId = `overlay-${id}-icon`;
-      if (!map.hasImage(spriteId)) {
-        map.addImage(spriteId, emojiToSprite(emoji));
+    // Loading indicator that hides once style loads (or shows fallback if it never does).
+    const loadingEl = document.createElement("div");
+    loadingEl.id = "treemap-loading";
+    loadingEl.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0a0a0a;color:#909090;font-family:Inter,sans-serif;font-size:13px;z-index:2;pointer-events:none";
+    loadingEl.innerHTML = '<div><div style="font-size:32px;margin-bottom:8px;text-align:center">🌍</div>Loading map…</div>';
+    mapContainer.current.appendChild(loadingEl);
+    const loadTimeout = window.setTimeout(() => {
+      // If still loading after 10s, replace with the WebGL-blocked fallback.
+      if (!styleReadyRef.current && mapContainer.current && document.getElementById("treemap-loading")) {
+        mapContainer.current.innerHTML = renderMapFallback("Map tiles could not load. This usually means WebGL is disabled or your network blocks tile CDNs.");
       }
+    }, 10000);
 
-      map.addSource(`overlay-${id}`, {
+    map.on("error", (e) => {
+      // Maplibre errors are non-fatal individually but log to help diagnose.
+      console.warn("[WorldMap] maplibre error", (e as { error?: { message?: string } }).error?.message ?? e);
+    });
+
+    try {
+      map.scrollZoom.enable();
+      map.dragPan.enable();
+      map.touchZoomRotate.disableRotation();
+      map.keyboard.disable();
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "imperial", maxWidth: 120 }), "bottom-left");
+    } catch (e) {
+      console.warn("[WorldMap] controls init failed", e);
+    }
+
+    map.on("load", () => {
+      window.clearTimeout(loadTimeout);
+      document.getElementById("treemap-loading")?.remove();
+      // Globe projection: supported in maplibre-gl >= 5; safe no-op on 4.x.
+      const maybeGlobe = map as unknown as {
+        setProjection?: (p: { type: string }) => void;
+      };
+      try {
+        maybeGlobe.setProjection?.({ type: "globe" });
+      } catch {
+        // older versions ignore
+      }
+      styleReadyRef.current = true;
+
+      const initialProps =
+        useLeadStore.getState().properties.length > 0
+          ? useLeadStore.getState().properties
+          : BOSTON_PROPERTIES;
+
+      // NEXRAD radar source + layer (rendered above basemap, below service area).
+      map.addSource("nexrad", {
+        type: "raster",
+        tiles: [
+          "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0q-900913/{z}/{x}/{y}.png",
+        ],
+        tileSize: 256,
+        attribution: "Radar © Iowa State Mesonet / NWS",
+      });
+      map.addLayer({
+        id: "nexrad-radar",
+        type: "raster",
+        source: "nexrad",
+        paint: { "raster-opacity": 0.65 },
+        layout: { visibility: "visible" },
+      });
+
+      // NWS alerts source (initially empty).
+      map.addSource("nws-alerts", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
       });
-      add({
-        id: `overlay-${id}-glow`,
-        type: "circle",
-        source: `overlay-${id}`,
-        minzoom: 2,
+      map.addLayer({
+        id: "nws-alerts-fill",
+        type: "fill",
+        source: "nws-alerts",
+        paint: {
+          "fill-color": [
+            "match",
+            ["get", "severity"],
+            "Extreme", "#dc2626",
+            "Severe", "#ef4444",
+            "Moderate", "#f59e0b",
+            "Minor", "#eab308",
+            "#9ca3af",
+          ],
+          "fill-opacity": 0.25,
+        },
+      });
+      map.addLayer({
+        id: "nws-alerts-outline",
+        type: "line",
+        source: "nws-alerts",
+        paint: {
+          "line-color": [
+            "match",
+            ["get", "severity"],
+            "Extreme", "#dc2626",
+            "Severe", "#ef4444",
+            "Moderate", "#f59e0b",
+            "#9ca3af",
+          ],
+          "line-width": 1.5,
+          "line-opacity": 0.85,
+        },
+      });
+
+      // Property source (clustered).
+      map.addSource(PROPERTIES_SOURCE, {
+        type: "geojson",
+        data: propertiesToFeatureCollection(initialProps),
+        cluster: true,
+        clusterMaxZoom: 8,
+        clusterRadius: 50,
+      });
+
+      // County source.
+      map.addSource(COUNTIES_SOURCE, {
+        type: "geojson",
+        data: maCountiesGeojson as FeatureCollection<Polygon | MultiPolygon>,
+      });
+
+      // Service area source.
+      map.addSource(SERVICE_SOURCE, {
+        type: "geojson",
+        data: SERVICE_AREA,
+      });
+
+      // Service area fill (under everything).
+      map.addLayer({
+        id: SERVICE_FILL_LAYER,
+        type: "fill",
+        source: SERVICE_SOURCE,
+        paint: {
+          "fill-color": "#22c55e",
+          "fill-opacity": 0.10,
+        },
+      });
+
+      // Service area outer glow.
+      map.addLayer({
+        id: SERVICE_GLOW_LAYER,
+        type: "line",
+        source: SERVICE_SOURCE,
+        paint: {
+          "line-color": "#22c55e",
+          "line-width": 10,
+          "line-opacity": 0.18,
+          "line-blur": 8,
+        },
+      });
+
+      // Service area crisp outline.
+      map.addLayer({
+        id: SERVICE_OUTLINE_LAYER,
+        type: "line",
+        source: SERVICE_SOURCE,
+        paint: {
+          "line-color": "#22c55e",
+          "line-width": 2,
+          "line-opacity": 0.9,
+        },
+      });
+
+      // NDVI heat hex grid (initially hidden).
+      map.addSource(NDVI_HEAT_SOURCE, {
+        type: "geojson",
+        data: buildNdviHeatFeatures(initialProps),
+      });
+      map.addLayer({
+        id: NDVI_HEAT_FILL_LAYER,
+        type: "fill",
+        source: NDVI_HEAT_SOURCE,
         layout: { visibility: "none" },
         paint: {
-          "circle-color": color,
-          "circle-radius": Math.round(glowR * 0.7),
-          "circle-opacity": 0.08,
-          "circle-blur": 1.8,
-        },
-      });
-      add({
-        id: `overlay-${id}-dot`,
-        type: "symbol",
-        source: `overlay-${id}`,
-        minzoom: 2,
-        layout: {
-          visibility: "none",
-          "icon-image": spriteId,
-          "icon-size": 0.5,
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
-          "icon-anchor": "center",
-        } as maplibregl.SymbolLayerSpecification["layout"],
-        paint: { "icon-opacity": 0.55 },
-      });
-
-      // Hover tooltip
-      map.on("mouseenter", `overlay-${id}-dot`, (e) => {
-        map.getCanvas().style.cursor = "pointer";
-        // Suppress country popup while hovering an overlay point
-        if (countryHoverTimer.current) { clearTimeout(countryHoverTimer.current); countryHoverTimer.current = null; }
-        setHoverCountry(null);
-        if (!e.features?.length) return;
-        const props = e.features[0].properties ?? {};
-        const canvas = map.getCanvas().getBoundingClientRect();
-        const rows: { label: string; value: string }[] = [];
-        if (props.date)     rows.push({ label: "date",    value: String(props.date) });
-        if (props.country)  rows.push({ label: "country", value: String(props.country) });
-        if (props.deaths !== undefined && Number(props.deaths) > 0)
-                            rows.push({ label: "deaths",  value: String(props.deaths) });
-        if (props.sport)    rows.push({ label: "sport",   value: String(props.sport) });
-        if (props.venue)    rows.push({ label: "venue",   value: String(props.venue) });
-        if (props.city)     rows.push({ label: "city",    value: String(props.city) });
-        if (props.type && !["soccer","basketball","baseball","hockey","tennis","golf","combat"].includes(id))
-                            rows.push({ label: "type",    value: String(props.type) });
-        if (props.altitude) rows.push({ label: "alt",     value: `${Math.round(Number(props.altitude) / 100) * 100} ft` });
-        if (props.speed)    rows.push({ label: "speed",   value: `${Math.round(Number(props.speed))} kts` });
-        if (props.duration) rows.push({ label: "duration", value: String(props.duration) });
-        setHoverOverlay({
-          layerId: id,
-          color,
-          title: String(props.title || id).slice(0, 80),
-          rows,
-          x: canvas.left + e.point.x,
-          y: canvas.top  + e.point.y,
-        });
-      });
-      map.on("mouseleave", `overlay-${id}-dot`, () => {
-        map.getCanvas().style.cursor = "";
-        setHoverOverlay(null);
-      });
-    }
-
-    // Burst ripple rings — rendered on top of everything (no beforeId)
-    map.addSource("overlay-burst", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    map.addLayer({
-      id: "overlay-burst-ring",
-      type: "circle",
-      source: "overlay-burst",
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["get", "radius"],
-        "circle-stroke-width": ["get", "strokeWidth"],
-        "circle-stroke-color": ["get", "color"],
-        "circle-stroke-opacity": ["get", "opacity"],
-      },
-    });
-  }
-
-  // Add GeoJSON source + layers for markets (no MapLibre clustering — we handle it ourselves)
-  // beforeId: insert all market layers below this layer (typically the first label layer)
-  function addMarketLayers(map: maplibregl.Map, beforeId?: string) {
-    map.addSource("markets", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-
-    // Helper: insert below labels
-    const add = (layer: Parameters<typeof map.addLayer>[0]) =>
-      map.addLayer(layer, beforeId);
-
-    // --- CLUSTER LAYERS ---
-
-    // Cluster soft glow — warm tinted
-    add({
-      id: "clusters-glow",
-      type: "circle",
-      source: "markets",
-      filter: ["has", "point_count"],
-      maxzoom: 8,
-      paint: {
-        "circle-color": "#4a8c6a",
-        "circle-radius": [
-          "step", ["get", "point_count"],
-          12, 5, 16, 15, 20, 50, 24,
-        ],
-        "circle-opacity": [
-          "interpolate", ["linear"], ["zoom"],
-          1.5, 0.1,
-          4, 0.2,
-        ],
-        "circle-blur": 1,
-      },
-    });
-
-    // Cluster dot — tinted fill instead of black
-    add({
-      id: "clusters",
-      type: "circle",
-      source: "markets",
-      filter: ["has", "point_count"],
-      maxzoom: 8,
-      paint: {
-        "circle-color": "#1e3a2f",
-        "circle-radius": [
-          "step", ["get", "point_count"],
-          10, 10, 14, 50, 18,
-        ],
-        "circle-opacity": 1,
-        "circle-stroke-width": 0.5,
-        "circle-stroke-color": "rgba(34, 197, 94, 0.25)",
-      },
-    });
-
-    // Cluster count labels
-    add({
-      id: "cluster-count",
-      type: "symbol",
-      source: "markets",
-      filter: ["has", "point_count"],
-      maxzoom: 8,
-      layout: {
-        "text-field": "{point_count_abbreviated}",
-        "text-size": [
-          "step", ["get", "point_count"],
-          9, 10, 10, 50, 11,
-        ],
-        "text-font": ["Open Sans Bold"],
-        "text-allow-overlap": true,
-        "text-ignore-placement": true,
-      },
-      paint: {
-        "text-color": [
-          "interpolate", ["linear"], ["zoom"],
-          1.5, "rgba(34, 197, 94, 0.5)",
-          5, "rgba(34, 197, 94, 0.8)",
-        ],
-      },
-    });
-
-    // --- INDIVIDUAL MARKER LAYERS ---
-
-    // Breathing glow behind market emoji icons
-    add({
-      id: "market-breathe-glow",
-      type: "circle",
-      source: "markets",
-      filter: ["!", ["has", "point_count"]],
-      minzoom: 3,
-      paint: {
-        "circle-color": ["get", "color"],
-        "circle-radius": [
-          "interpolate", ["linear"], ["zoom"],
-          1.5, 6,
-          4, 10,
-          8, 16,
-        ],
-        "circle-opacity": 0.12,
-        "circle-blur": 1.2,
-      },
-    });
-
-    // Core emoji icon — category-based
-    add({
-      id: "unclustered-point",
-      type: "symbol",
-      source: "markets",
-      filter: ["!", ["has", "point_count"]],
-      layout: {
-        "icon-image": [
-          "case",
-          ["!=", ["get", "subEmoji"], ""],
-            ["concat", "market-sub-", ["get", "subEmoji"]],
-          ["concat", "market-emoji-", ["get", "category"]],
-        ],
-        "icon-size": [
-          "interpolate", ["linear"], ["zoom"],
-          1.5, 0.5,
-          4,   0.65,
-          8,   0.8,
-        ],
-        "icon-allow-overlap": true,
-        "icon-ignore-placement": true,
-        "symbol-z-order": "source",
-        "symbol-sort-key": ["*", ["get", "radius"], -1],  // larger markets on top
-      },
-      paint: {
-        "icon-opacity": 1,
-      },
-    });
-
-    // Signal glow (pulsing via rAF) — proportional radius
-    add({
-      id: "signal-glow",
-      type: "circle",
-      source: "markets",
-      filter: ["all", ["!", ["has", "point_count"]], ["get", "hasSignal"]],
-      minzoom: 2,
-      paint: {
-        "circle-color": ["get", "signalColor"],
-        "circle-radius": ["get", "signalRadius"],
-        "circle-opacity": 0.15,
-        "circle-blur": 1,
-      },
-    });
-
-    // Signal pulse ring (outer) — double-ring radar ping effect
-    add({
-      id: "signal-pulse-ring",
-      type: "circle",
-      source: "markets",
-      filter: ["all", ["!", ["has", "point_count"]], ["get", "hasSignal"]],
-      minzoom: 2,
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["+", ["get", "signalRadius"], 4],
-        "circle-stroke-width": 0.6,
-        "circle-stroke-color": ["get", "signalColor"],
-        "circle-stroke-opacity": 0.1,
-      },
-    });
-
-    // Anomaly glow — amber pulse for anomalous markets
-    add({
-      id: "anomaly-glow",
-      type: "circle",
-      source: "markets",
-      filter: ["all", ["!", ["has", "point_count"]], ["get", "isAnomaly"]],
-      minzoom: 2,
-      paint: {
-        "circle-color": "#f59e0b",
-        "circle-radius": ["+", ["get", "radius"], 6],
-        "circle-opacity": 0.12,
-        "circle-blur": 1,
-      },
-    });
-
-    // Selected market ring — persistent green pulse + faint glow fill
-    add({
-      id: "selected-ring",
-      type: "circle",
-      source: "markets",
-      filter: ["all", ["!", ["has", "point_count"]], ["get", "isSelected"]],
-      paint: {
-        "circle-color": "#22c55e",
-        "circle-opacity": 0.04,
-        "circle-radius": ["+", ["get", "radius"], 4],
-        "circle-stroke-width": 1.2,
-        "circle-stroke-color": "#22c55e",
-        "circle-stroke-opacity": 0.7,
-      },
-    });
-
-    // Selected market beacon — outer concentric ring, half-speed pulse
-    add({
-      id: "selected-beacon",
-      type: "circle",
-      source: "markets",
-      filter: ["all", ["!", ["has", "point_count"]], ["get", "isSelected"]],
-      minzoom: 2,
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["+", ["get", "radius"], 10],
-        "circle-stroke-width": 0.8,
-        "circle-stroke-color": "#22c55e",
-        "circle-stroke-opacity": 0.15,
-      },
-    });
-
-    // Hover highlight ring — activated via feature-state
-    add({
-      id: "marker-hover",
-      type: "circle",
-      source: "markets",
-      filter: ["!", ["has", "point_count"]],
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["+", ["get", "radius"], 2],
-        "circle-stroke-width": [
-          "case",
-          ["boolean", ["feature-state", "hover"], false],
-          1.2,
-          0,
-        ],
-        "circle-stroke-color": "rgba(34, 197, 94, 0.5)",
-      },
-    });
-
-    // --- NEW MARKET RING SOURCE (Feature 2) ---
-    map.addSource("new-market-rings", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    add({
-      id: "new-market-glow",
-      type: "circle",
-      source: "new-market-rings",
-      paint: {
-        "circle-color": "#22c55e",
-        "circle-radius": ["get", "glowRadius"],
-        "circle-opacity": ["get", "glowOpacity"],
-        "circle-blur": 1,
-      },
-    });
-    add({
-      id: "new-market-ring",
-      type: "circle",
-      source: "new-market-rings",
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["get", "radius"],
-        "circle-stroke-width": ["get", "strokeWidth"],
-        "circle-stroke-color": "#22c55e",
-        "circle-stroke-opacity": ["get", "opacity"],
-      },
-    });
-    add({
-      id: "new-market-core",
-      type: "circle",
-      source: "new-market-rings",
-      paint: {
-        "circle-color": "#22c55e",
-        "circle-radius": ["get", "coreRadius"],
-        "circle-opacity": ["get", "coreOpacity"],
-      },
-    });
-
-    // --- TRADE FLASH SOURCE (Feature 4) ---
-    map.addSource("trade-flashes", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    add({
-      id: "trade-flash-glow",
-      type: "circle",
-      source: "trade-flashes",
-      paint: {
-        "circle-color": ["get", "color"],
-        "circle-radius": ["get", "glowRadius"],
-        "circle-opacity": ["get", "glowOpacity"],
-        "circle-blur": 1,
-      },
-    });
-    add({
-      id: "trade-flash-ring",
-      type: "circle",
-      source: "trade-flashes",
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["get", "radius"],
-        "circle-stroke-width": ["get", "strokeWidth"],
-        "circle-stroke-color": ["get", "color"],
-        "circle-stroke-opacity": ["get", "opacity"],
-      },
-    });
-
-    // --- CLOSED MARKET COLLAPSE ANIMATION ---
-    map.addSource("closed-market-anims", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    // Cross-star arms (4 lines radiating outward, then collapsing)
-    add({
-      id: "closed-star-glow",
-      type: "circle",
-      source: "closed-market-anims",
-      paint: {
-        "circle-color": ["get", "color"],
-        "circle-radius": ["get", "glowRadius"],
-        "circle-opacity": ["get", "glowOpacity"],
-        "circle-blur": 1,
-      },
-    });
-    add({
-      id: "closed-star-ring",
-      type: "circle",
-      source: "closed-market-anims",
-      paint: {
-        "circle-color": "transparent",
-        "circle-radius": ["get", "radius"],
-        "circle-stroke-width": ["get", "strokeWidth"],
-        "circle-stroke-color": ["get", "color"],
-        "circle-stroke-opacity": ["get", "opacity"],
-      },
-    });
-    add({
-      id: "closed-star-core",
-      type: "circle",
-      source: "closed-market-anims",
-      paint: {
-        "circle-color": ["get", "color"],
-        "circle-radius": ["get", "coreRadius"],
-        "circle-opacity": ["get", "coreOpacity"],
-      },
-    });
-
-    // --- INTERACTIONS ---
-
-    // Click continent cluster → zoom past threshold to show individual bubbles
-    map.on("click", "clusters", (e) => {
-      const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
-      if (!features.length) return;
-      const geom = features[0].geometry;
-      if (geom.type === "Point") {
-        map.easeTo({ center: geom.coordinates as [number, number], zoom: ZOOM_TIER_THRESHOLDS[0] + 0.5 });
-      }
-    });
-
-    // Click individual → desktop: select market; mobile: show preview popup above icon
-    map.on("click", "unclustered-point", (e) => {
-      if (!e.features?.length) return;
-      const props = e.features[0].properties;
-      const geom = e.features[0].geometry;
-      if (!props || geom.type !== "Point") return;
-      const market = marketsLookup.current.get(props.marketId);
-      if (!market) return;
-
-      const mobile = window.innerWidth <= 768;
-      // Always select the market so detail panel tracks it
-      if (onMarketClick) onMarketClick(market);
-      if (mobile) {
-        // Show popup above the tapped icon
-        if (hoverTimer.current) clearTimeout(hoverTimer.current);
-        const pw = Math.min(300, window.innerWidth - 16);
-        const maxH = 360;
-        const gap = 20;
-        const point = e.point;
-        const canvas = map.getCanvas().getBoundingClientRect();
-        const screenX = canvas.left + point.x;
-        const screenY = canvas.top + point.y;
-        let left = screenX - pw / 2;
-        left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-        // Prefer above icon (bottom-anchored so it hugs the icon); fall back to below
-        const spaceAbove = screenY - canvas.top;
-        if (spaceAbove > 120) {
-          // Bottom of popup = 6px above icon
-          const bottom = window.innerHeight - screenY + gap;
-          setHoverMarket(market);
-          setHoverPos({ bottom, left });
-        } else {
-          const top = screenY + gap + 16; // 16 ≈ icon size
-          setHoverMarket(market);
-          setHoverPos({ top, left });
-        }
-      } else {
-        // Desktop: dismiss hover popup, detail panel will show
-        if (hoverTimer.current) clearTimeout(hoverTimer.current);
-        setHoverMarket(null);
-        setHoverPos(null);
-      }
-    });
-
-    // Tap elsewhere on map → dismiss mobile popups
-    map.on("click", (e) => {
-      if (window.innerWidth > 768) return;
-      const features = map.queryRenderedFeatures(e.point, { layers: ["unclustered-point"] });
-      if (features.length > 0) return; // tapped a marker, handled above
-      setHoverMarket(null);
-      setHoverPos(null);
-      if (onMapTap) onMapTap();
-    });
-
-    // Hover: feature-state highlight + cursor + preview popup
-    let hoveredId: string | number | null = null;
-    let hoveredMarketId: string | null = null;
-
-    const updateHover = (e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] }) => {
-      if (!e.features?.length) return;
-      const feature = e.features[0];
-      const id = feature.id;
-      const props = feature.properties;
-      const marketId = props?.marketId as string | undefined;
-
-      // Same feature — skip
-      if (marketId && marketId === hoveredMarketId) return;
-
-      // Clear previous highlight
-      if (hoveredId !== null) {
-        map.setFeatureState({ source: "markets", id: hoveredId }, { hover: false });
-        hoveredId = null;
-      }
-
-      // Set new highlight
-      if (id !== undefined && id !== null) {
-        hoveredId = id;
-        map.setFeatureState({ source: "markets", id: hoveredId }, { hover: true });
-      }
-
-      hoveredMarketId = marketId ?? null;
-
-      if (marketId) {
-        const market = marketsLookup.current.get(marketId);
-        if (market && market.id !== selectedMarketIdRef.current) {
-          if (hoverTimer.current) clearTimeout(hoverTimer.current);
-          if (countryHoverTimer.current) clearTimeout(countryHoverTimer.current);
-          setHoverCountry(null);
-          const showPopup = () => {
-            const point = e.point;
-            const canvas = map.getCanvas().getBoundingClientRect();
-            const screenX = canvas.left + point.x;
-            const screenY = canvas.top + point.y;
-            const vw = window.innerWidth;
-            const vh = window.innerHeight;
-            let left = screenX + 16;
-            if (left + PREVIEW_W > vw - 4) {
-              left = screenX - PREVIEW_W - 16;
-            }
-            left = Math.max(4, Math.min(left, vw - PREVIEW_W - 4));
-            let top = screenY - 40;
-            top = Math.max(4, Math.min(top, vh - PREVIEW_MAX_H - 4));
-            setHoverMarket(market);
-            setHoverPos({ top, left });
-          };
-          // If a popup is already showing, switch immediately; otherwise delay
-          if (hoverMarketRef.current) {
-            showPopup();
-          } else {
-            hoverTimer.current = setTimeout(showPopup, 350);
-          }
-        }
-      }
-    };
-
-    map.on("mouseenter", "unclustered-point", (e) => {
-      map.getCanvas().style.cursor = "pointer";
-      updateHover(e);
-    });
-    map.on("mousemove", "unclustered-point", updateHover);
-    map.on("mouseleave", "unclustered-point", () => {
-      map.getCanvas().style.cursor = "";
-      hoveredMarketId = null;
-      if (hoveredId !== null) {
-        map.setFeatureState({ source: "markets", id: hoveredId }, { hover: false });
-        hoveredId = null;
-      }
-      if (hoverTimer.current) clearTimeout(hoverTimer.current);
-      // Delay dismiss so user can move mouse to the popup
-      hoverTimer.current = setTimeout(() => {
-        hoverTimer.current = null;
-        setHoverMarket(null);
-        setHoverPos(null);
-      }, 300);
-    });
-    map.on("mouseenter", "clusters", () => { map.getCanvas().style.cursor = "pointer"; });
-    map.on("mouseleave", "clusters", () => { map.getCanvas().style.cursor = ""; });
-  }
-
-  // Add country boundary hover/highlight interaction
-  function addCountryInteraction(map: maplibregl.Map) {
-    if (countryLayersAdded.current) return;
-    countryLayersAdded.current = true;
-
-    // Use topojson country boundaries
-    fetch("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json")
-      .then((r) => r.json())
-      .then((topology) => {
-        // Convert TopoJSON to GeoJSON (with antimeridian fix)
-        const countries = topojsonFeature(topology, topology.objects.countries);
-        // Keep Taiwan in geo features but treat as part of China for selection
-        if (!map.getSource("country-boundaries")) {
-          map.addSource("country-boundaries", {
-            type: "geojson",
-            data: countries,
-          });
-
-          // Invisible interactive layer (for hover detection)
-          map.addLayer(
-            {
-              id: "country-fills",
-              type: "fill",
-              source: "country-boundaries",
-              paint: {
-                "fill-color": "#888",
-                "fill-opacity": 0,
-              },
-            },
-            "clusters" // insert below market layers
-          );
-
-          // Hover highlight
-          map.addLayer(
-            {
-              id: "country-hover",
-              type: "fill",
-              source: "country-boundaries",
-              paint: {
-                "fill-color": "#fff",
-                "fill-opacity": 0.03,
-              },
-              filter: ["==", ["get", "name"], ""],
-            },
-            "clusters"
-          );
-
-          // Border highlight on hover
-          map.addLayer(
-            {
-              id: "country-hover-border",
-              type: "line",
-              source: "country-boundaries",
-              paint: {
-                "line-color": "#555",
-                "line-width": 0.8,
-                "line-opacity": 0.5,
-              },
-              filter: ["==", ["get", "name"], ""],
-            },
-            "clusters"
-          );
-
-          // Selected country: persistent green fill
-          map.addLayer(
-            {
-              id: "country-selected",
-              type: "fill",
-              source: "country-boundaries",
-              paint: {
-                "fill-color": "rgba(34,197,94,0.08)",
-                "fill-opacity": 1,
-              },
-              filter: ["==", ["get", "name"], ""],
-            },
-            "clusters"
-          );
-
-          // Selected country: green border
-          map.addLayer(
-            {
-              id: "country-selected-border",
-              type: "line",
-              source: "country-boundaries",
-              paint: {
-                "line-color": "#22c55e",
-                "line-width": 1.5,
-                "line-opacity": 0.8,
-              },
-              filter: ["==", ["get", "name"], ""],
-            },
-            "clusters"
-          );
-        }
-
-        applySelectedCountryHighlight(map);
-
-        // Mouse interaction
-        let hoveredName: string | null = null;
-
-        map.on("mousemove", "country-fills", (e) => {
-          const feat = e.features?.[0];
-          const name = feat?.properties?.name as string | undefined;
-          // If hovering over a market icon, suppress country hover entirely
-          const marketFeatures = map.queryRenderedFeatures(e.point, { layers: ["unclustered-point"] });
-          if (marketFeatures.length > 0) {
-            if (countryHoverTimer.current) clearTimeout(countryHoverTimer.current);
-            setHoverCountry(null);
-            if (hoveredName) {
-              hoveredName = null;
-              map.setFilter("country-hover", ["==", ["get", "name"], ""]);
-              map.setFilter("country-hover-border", ["==", ["get", "name"], ""]);
-            }
-            return;
-          }
-          clearHoverPopup();
-          if (name && name !== hoveredName) {
-            hoveredName = name;
-            map.setFilter("country-hover", ["==", ["get", "name"], name]);
-            map.setFilter("country-hover-border", ["==", ["get", "name"], name]);
-            if (countryHoverTimer.current) clearTimeout(countryHoverTimer.current);
-            const { x, y } = e.point;
-            countryHoverTimer.current = setTimeout(() => {
-              if (window.innerWidth > 768) setHoverCountry({ name, x, y });
-            }, 800);
-          }
-        });
-
-        map.on("mouseleave", "country-fills", () => {
-          hoveredName = null;
-          map.setFilter("country-hover", ["==", ["get", "name"], ""]);
-          map.setFilter("country-hover-border", ["==", ["get", "name"], ""]);
-          if (countryHoverTimer.current) clearTimeout(countryHoverTimer.current);
-          setHoverCountry(null);
-        });
-
-        // Country click → callback (skip if a market icon was clicked, or mobile popup is active)
-        map.on("click", "country-fills", (e) => {
-          const marketHit = map.queryRenderedFeatures(e.point, { layers: ["unclustered-point"] });
-          if (marketHit.length > 0) return;
-          // Mobile: if a market popup is showing, just dismiss it — don't trigger country navigation
-          if (window.innerWidth <= 768 && hoverMarketRef.current) return;
-
-          const feat = e.features?.[0];
-          const name = feat?.properties?.name as string | undefined;
-          if (name && onCountryClick) {
-            onCountryClick(name);
-          }
-
-          // Zoom to the clicked country's bounding box
-          if (feat?.geometry) {
-            const bounds = new maplibregl.LngLatBounds();
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const addRing = (ring: any[]) => {
-              for (const c of ring) bounds.extend([c[0] as number, c[1] as number]);
-            };
-            const geom = feat.geometry as { type: string; coordinates: unknown[] };
-            if (geom.type === "Polygon") {
-              for (const ring of geom.coordinates as number[][][]) addRing(ring);
-            } else if (geom.type === "MultiPolygon") {
-              for (const poly of geom.coordinates as number[][][][])
-                for (const ring of poly) addRing(ring);
-            }
-            if (!bounds.isEmpty()) {
-              map.fitBounds(bounds, { padding: 48, duration: 1200, maxZoom: 6 });
-            }
-          }
-        });
-      })
-      .catch((err) => console.warn("Failed to load country boundaries:", err));
-  }
-
-
-  // Update GeoJSON source when data/filters change
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-    const map = mapRef.current;
-    const source = map.getSource("markets") as maplibregl.GeoJSONSource;
-    if (!source) return;
-
-    const filtered = markets.filter((m) => activeCategories.has(m.category));
-
-    marketsLookup.current.clear();
-    for (const m of filtered) {
-      marketsLookup.current.set(m.id, m);
-    }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let features: any[];
-
-    if (currentTier === 0) {
-      // --- Tier 0: continent aggregates ---
-      const groups = new Map<string, { lats: number[]; lngs: number[]; count: number }>();
-      for (const m of filtered) {
-        if (!m.coords) continue;
-        const key = getGroupKey(m, 0);
-        const g = groups.get(key);
-        if (g) { g.lats.push(m.coords[0]); g.lngs.push(m.coords[1]); g.count++; }
-        else groups.set(key, { lats: [m.coords[0]], lngs: [m.coords[1]], count: 1 });
-      }
-      features = Array.from(groups.entries()).map(([key, g], i) => ({
-        type: "Feature" as const,
-        id: i,
-        geometry: {
-          type: "Point" as const,
-          coordinates: [
-            g.lngs.reduce((a, b) => a + b, 0) / g.count,
-            g.lats.reduce((a, b) => a + b, 0) / g.count,
+          "fill-color": [
+            "interpolate", ["linear"], ["get", "stress"],
+            20, "rgba(34,197,94,0.0)",
+            40, "rgba(34,197,94,0.20)",
+            60, "rgba(245,158,11,0.30)",
+            80, "rgba(239,68,68,0.45)",
           ],
+          "fill-opacity": 0.9,
         },
-        properties: {
-          point_count: g.count,
-          point_count_abbreviated: g.count >= 1000 ? `${(g.count / 1000).toFixed(1)}k` : String(g.count),
-          continent: key,
+      });
+      map.addLayer({
+        id: NDVI_HEAT_OUTLINE_LAYER,
+        type: "line",
+        source: NDVI_HEAT_SOURCE,
+        layout: { visibility: "none" },
+        paint: {
+          "line-color": [
+            "interpolate", ["linear"], ["get", "stress"],
+            20, "rgba(34,197,94,0.4)",
+            40, "rgba(34,197,94,0.5)",
+            60, "rgba(245,158,11,0.6)",
+            80, "rgba(239,68,68,0.7)",
+          ],
+          "line-width": 0.5,
+          "line-opacity": 0.8,
         },
-      }));
-    } else {
-      // --- Tier 1: individual markets ---
-      const spaced = offsetColocated(filtered);
+      });
 
-      // Compute log+sqrt area-proportional sizing (2–10px)
-      const volumes = spaced.filter((m) => m.coords).map((m) => m.volume24h || m.volume || 0);
-      volumes.sort((a, b) => a - b);
+      // Crew route source + layers (initially hidden).
+      map.addSource(ROUTE_SOURCE, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: ROUTE_GLOW_LAYER,
+        type: "line",
+        source: ROUTE_SOURCE,
+        filter: ["==", ["get", "kind"], "line"],
+        layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": "#f97316",
+          "line-width": 8,
+          "line-blur": 6,
+          "line-opacity": 0.35,
+        },
+      });
+      map.addLayer({
+        id: ROUTE_LINE_LAYER,
+        type: "line",
+        source: ROUTE_SOURCE,
+        filter: ["==", ["get", "kind"], "line"],
+        layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": "#fb923c",
+          "line-width": 2.5,
+          "line-dasharray": [3, 2],
+          "line-opacity": 0.95,
+        },
+      });
+      map.addLayer({
+        id: ROUTE_NODE_LAYER,
+        type: "circle",
+        source: ROUTE_SOURCE,
+        filter: ["==", ["get", "kind"], "node"],
+        layout: { visibility: "none" },
+        paint: {
+          "circle-color": "#fb923c",
+          "circle-radius": 4,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1,
+        },
+      });
 
-      const minR = 2, maxR = 10;
-      const logMin = Math.log1p(volumes[0] || 0);
-      const logMax = Math.log1p(volumes[volumes.length - 1] || 1);
+      // County fill (under pins).
+      map.addLayer({
+        id: COUNTY_FILL_LAYER,
+        type: "fill",
+        source: COUNTIES_SOURCE,
+        paint: {
+          "fill-color": [
+            "case",
+            ["==", ["get", "name"], ["literal", ""]],
+            "rgba(239,68,68,0.18)",
+            "rgba(34,197,94,0.0)",
+          ],
+          "fill-opacity": 1,
+        },
+      });
 
-      features = spaced
-        .filter((m) => m.coords)
-        .map((m, i) => {
-          const color = colorMode === "impact"
-            ? IMPACT_COLORS[m.impactLevel as ImpactLevel] || IMPACT_COLORS.info
-            : CATEGORY_COLORS[m.category] || CATEGORY_COLORS.Other;
-          const vol = m.volume24h || m.volume || 0;
+      map.addLayer({
+        id: COUNTY_OUTLINE_LAYER,
+        type: "line",
+        source: COUNTIES_SOURCE,
+        paint: {
+          "line-color": "#22c55e",
+          "line-width": 0.5,
+          "line-opacity": 0.25,
+        },
+      });
 
-          const logVol = Math.log1p(vol);
-          const t = logMax > logMin ? (logVol - logMin) / (logMax - logMin) : 0;
-          const radius = minR + Math.sqrt(t) * (maxR - minR);
-          const glowIntensity = 0.12 + t * 0.3;
+      // Storm track source (line) + head source (single point that animates)
+      map.addSource(STORM_TRACK_SOURCE, {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates: STORM_TRACK_COORDS },
+        },
+      });
+      map.addSource(STORM_HEAD_SOURCE, {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          properties: {},
+          geometry: { type: "Point", coordinates: STORM_TRACK_COORDS[0] },
+        },
+      });
 
-          const change = m.change ?? 0;
-          const hasSignal = m.change !== null && Math.abs(m.change) > 0.05;
-          const signalColor =
-            m.change !== null && m.change > 0 ? "#22c55e" : "#ff4444";
-          const signalRadius = hasSignal
-            ? radius + 3 + Math.min(5, Math.abs(change) * 50)
-            : 0;
+      // Outer glow line
+      map.addLayer({
+        id: STORM_TRACK_GLOW_LAYER,
+        type: "line",
+        source: STORM_TRACK_SOURCE,
+        paint: {
+          "line-color": "#ef4444",
+          "line-width": 12,
+          "line-blur": 8,
+          "line-opacity": 0.25,
+        },
+        layout: { "line-cap": "round", "line-join": "round" },
+      });
+      // Crisp dashed line
+      map.addLayer({
+        id: STORM_TRACK_LAYER,
+        type: "line",
+        source: STORM_TRACK_SOURCE,
+        paint: {
+          "line-color": "#ef4444",
+          "line-width": 2.5,
+          "line-dasharray": [2, 2],
+          "line-opacity": 0.9,
+        },
+        layout: { "line-cap": "round", "line-join": "round" },
+      });
 
-          const isAnomaly = m.anomaly?.isAnomaly ?? false;
-          const isSelected = m.id === selectedMarketId;
+      // Head: outer pulsing ring
+      map.addLayer({
+        id: STORM_HEAD_LAYER,
+        type: "circle",
+        source: STORM_HEAD_SOURCE,
+        paint: {
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-radius": 18,
+          "circle-stroke-color": "#ef4444",
+          "circle-stroke-width": 2,
+          "circle-stroke-opacity": 0.85,
+        },
+      });
+      // Head: solid core
+      map.addLayer({
+        id: STORM_HEAD_CORE_LAYER,
+        type: "circle",
+        source: STORM_HEAD_SOURCE,
+        paint: {
+          "circle-color": "#ef4444",
+          "circle-radius": 6,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1.5,
+        },
+      });
 
-          return {
-            type: "Feature" as const,
-            id: i,
-            geometry: {
-              type: "Point" as const,
-              coordinates: [m.coords![1], m.coords![0]],
-            },
-            properties: {
-              marketId: m.id,
-              color,
-              radius,
-              vol24h: vol,
-              glowIntensity,
-              hasSignal,
-              signalColor,
-              signalRadius,
-              isAnomaly,
-              isSelected,
-              shape: CATEGORY_SHAPES[m.category] || "circle",
-              category: m.category || "Other",
-              subEmoji: detectSubEmoji(m.category, m.title, m.description) || "",
-            },
-          };
-        });
-    }
+      // Animate storm head along the track on a 6s loop using requestAnimationFrame.
+      const start = performance.now();
+      const TRACK_MS = 6000;
 
-    source.setData({ type: "FeatureCollection", features });
+      function interpAlongTrack(t: number): [number, number] {
+        if (STORM_TRACK_COORDS.length < 2) return STORM_TRACK_COORDS[0];
+        const lengths: number[] = [];
+        let total = 0;
+        for (let i = 1; i < STORM_TRACK_COORDS.length; i++) {
+          const dx = STORM_TRACK_COORDS[i][0] - STORM_TRACK_COORDS[i - 1][0];
+          const dy = STORM_TRACK_COORDS[i][1] - STORM_TRACK_COORDS[i - 1][1];
+          const d = Math.hypot(dx, dy);
+          lengths.push(d);
+          total += d;
+        }
+        const target = t * total;
+        let acc = 0;
+        for (let i = 0; i < lengths.length; i++) {
+          if (acc + lengths[i] >= target) {
+            const localT = (target - acc) / lengths[i];
+            const a = STORM_TRACK_COORDS[i];
+            const b = STORM_TRACK_COORDS[i + 1];
+            return [a[0] + (b[0] - a[0]) * localT, a[1] + (b[1] - a[1]) * localT];
+          }
+          acc += lengths[i];
+        }
+        return STORM_TRACK_COORDS[STORM_TRACK_COORDS.length - 1];
+      }
 
-    // Detect disappeared markets → trigger cross-star collapse animation
-    // Skip when tier changes (all features change shape, not actual market closures)
-    const tierChanged = currentTier !== prevTierRef.current;
-    prevTierRef.current = currentTier;
-
-    if (!tierChanged && currentTier === 1) {
-      const currentIds = new Map<string, { lng: number; lat: number; color: string }>();
-      for (const f of features) {
-        if (f.properties.marketId) {
-          currentIds.set(f.properties.marketId, {
-            lng: f.geometry.coordinates[0],
-            lat: f.geometry.coordinates[1],
-            color: f.properties.color,
+      function tick(now: number) {
+        if (!mapRef.current) return;
+        const elapsed = (now - start) % TRACK_MS;
+        const t = elapsed / TRACK_MS;
+        const [lng, lat] = interpAlongTrack(t);
+        const headSrc = mapRef.current.getSource(STORM_HEAD_SOURCE) as
+          | maplibregl.GeoJSONSource
+          | undefined;
+        if (headSrc) {
+          headSrc.setData({
+            type: "Feature",
+            properties: {},
+            geometry: { type: "Point", coordinates: [lng, lat] },
           });
         }
-      }
-      const now = performance.now();
-      for (const [id, pos] of prevMarketIdsRef.current) {
-        if (!currentIds.has(id) && !closedAnimsRef.current.has(id)) {
-          closedAnimsRef.current.set(id, { startTime: now, ...pos });
+        const pulsePhase = (Math.sin((elapsed / 1000) * Math.PI * 2) + 1) / 2;
+        try {
+          mapRef.current.setPaintProperty(
+            STORM_HEAD_LAYER,
+            "circle-radius",
+            14 + 8 * pulsePhase,
+          );
+          mapRef.current.setPaintProperty(
+            STORM_HEAD_LAYER,
+            "circle-stroke-opacity",
+            0.4 + 0.5 * (1 - pulsePhase),
+          );
+        } catch {
+          /* layer may not exist during teardown */
         }
+        stormAnimRef.current = requestAnimationFrame(tick);
       }
-      // Cap closed animations map
-      if (closedAnimsRef.current.size > 100) {
-        const it = closedAnimsRef.current.keys();
-        while (closedAnimsRef.current.size > 100) closedAnimsRef.current.delete(it.next().value!);
-      }
-      prevMarketIdsRef.current = currentIds;
-    } else if (tierChanged) {
-      // Reset tracking on tier change
-      prevMarketIdsRef.current = new Map();
-    }
-  }, [markets, activeCategories, mapReady, colorMode, selectedMarketId, currentTier]);
+      stormAnimRef.current = requestAnimationFrame(tick);
 
-  // Update selected country highlight
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
-    applySelectedCountryHighlight(mapRef.current);
-  }, [selectedCountry, mapReady, currentTier, applySelectedCountryHighlight]);
+      // Halo (below pins).
+      map.addLayer({
+        id: HALO_LAYER,
+        type: "circle",
+        source: PROPERTIES_SOURCE,
+        filter: buildPinFilter(null, 0),
+        paint: {
+          "circle-color": URGENCY_COLOR_EXPR,
+          "circle-radius": HALO_RADIUS_EXPR,
+          "circle-blur": 0.85,
+          "circle-opacity": 0.55,
+        },
+      });
 
-  // Region flyTo
-  useEffect(() => {
-    if (!mapReady || !mapRef.current || !region) return;
-    const view = REGIONAL_VIEWS.find((r) => r.id === region);
-    if (!view) return;
-    mapRef.current.flyTo({
-      center: view.center,
-      zoom: view.zoom,
-      duration: 1200,
+      // Pin layer.
+      map.addLayer({
+        id: PIN_LAYER,
+        type: "circle",
+        source: PROPERTIES_SOURCE,
+        filter: buildPinFilter(null, 0),
+        paint: {
+          "circle-color": URGENCY_COLOR_EXPR,
+          "circle-radius": TREE_RADIUS_EXPR,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1.5,
+          "circle-opacity": 0.95,
+        },
+      });
+
+      // Selected layer — thicker white stroke for selected pins.
+      map.addLayer({
+        id: SELECTED_LAYER,
+        type: "circle",
+        source: PROPERTIES_SOURCE,
+        filter: ["all", ["!", ["has", "point_count"]], ["in", ["get", "id"], ["literal", []]]],
+        paint: {
+          "circle-color": URGENCY_COLOR_EXPR,
+          "circle-radius": TREE_RADIUS_EXPR,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 3,
+          "circle-opacity": 1,
+        },
+      });
+
+      // Active ring — pulses around the active property.
+      map.addLayer({
+        id: ACTIVE_RING_LAYER,
+        type: "circle",
+        source: PROPERTIES_SOURCE,
+        filter: ["all", ["!", ["has", "point_count"]], ["==", ["get", "id"], "___none___"]],
+        paint: {
+          "circle-color": "rgba(0,0,0,0)",
+          "circle-radius": [
+            "case",
+            [">=", ["get", "treeCount"], 5],
+            21,
+            [">=", ["get", "treeCount"], 3],
+            17,
+            14,
+          ],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+          "circle-stroke-opacity": 0.85,
+        },
+      });
+
+      // Labels above pins.
+      map.addLayer({
+        id: PIN_LABEL_LAYER,
+        type: "symbol",
+        source: PROPERTIES_SOURCE,
+        filter: buildPinFilter(null, 0),
+        minzoom: 13,
+        layout: {
+          "text-field": ["get", "address"],
+          "text-size": 10,
+          "text-offset": [0, 1.4],
+          "text-anchor": "top",
+          "text-allow-overlap": false,
+        },
+        paint: {
+          "text-color": "#e5e7eb",
+          "text-halo-color": "#0b0f17",
+          "text-halo-width": 1.2,
+        },
+      });
+
+      // Cluster bubbles.
+      map.addLayer({
+        id: CLUSTER_LAYER,
+        type: "circle",
+        source: PROPERTIES_SOURCE,
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": "rgba(15,23,42,0.85)",
+          "circle-radius": [
+            "step",
+            ["get", "point_count"],
+            16,
+            10,
+            22,
+            25,
+            28,
+          ],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 1.5,
+          "circle-opacity": 0.95,
+        },
+      });
+
+      map.addLayer({
+        id: CLUSTER_COUNT_LAYER,
+        type: "symbol",
+        source: PROPERTIES_SOURCE,
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-size": 12,
+          "text-allow-overlap": true,
+        },
+        paint: {
+          "text-color": "#ffffff",
+        },
+      });
+
+      // Cursor + click handlers for pins.
+      const onPinEnter = () => {
+        map.getCanvas().style.cursor = "pointer";
+      };
+      const onPinLeave = () => {
+        map.getCanvas().style.cursor = "";
+        useLeadStore.getState().setHovered(null);
+      };
+      const onPinMove = (
+        e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] },
+      ) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const id = (f.properties as PropertyFeatureProps | undefined)?.id ?? null;
+        useLeadStore.getState().setHovered(id);
+      };
+      const onPinClick = (
+        e: maplibregl.MapMouseEvent & { features?: maplibregl.MapGeoJSONFeature[] },
+      ) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const props = f.properties as PropertyFeatureProps | undefined;
+        if (!props) return;
+        const geom = f.geometry as Point;
+        const [lng, lat] = geom.coordinates as [number, number];
+        useLeadStore.getState().setActiveProperty(props.id);
+        useLeadStore.getState().setFlyTo({ lng, lat, zoom: 14, id: props.id });
+      };
+
+      map.on("mouseenter", PIN_LAYER, onPinEnter);
+      map.on("mousemove", PIN_LAYER, onPinMove);
+      map.on("mouseleave", PIN_LAYER, onPinLeave);
+      map.on("click", PIN_LAYER, onPinClick);
+
+      // Cluster click → zoom in.
+      map.on("click", CLUSTER_LAYER, (e) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const clusterId = (f.properties as { cluster_id?: number } | undefined)?.cluster_id;
+        const src = map.getSource(PROPERTIES_SOURCE) as maplibregl.GeoJSONSource | undefined;
+        if (clusterId === undefined || !src) return;
+        src
+          .getClusterExpansionZoom(clusterId)
+          .then((zoom) => {
+            const geom = f.geometry as Point;
+            const [lng, lat] = geom.coordinates as [number, number];
+            map.easeTo({ center: [lng, lat], zoom });
+          })
+          .catch(() => {
+            /* noop */
+          });
+      });
+      map.on("mouseenter", CLUSTER_LAYER, () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+      map.on("mouseleave", CLUSTER_LAYER, () => {
+        map.getCanvas().style.cursor = "";
+      });
+
+      // Intro: globe-spin to Boston with cinematic ease.
+      window.setTimeout(() => {
+        if (!mapRef.current) return;
+        map.flyTo({
+          center: BOSTON_CENTER,
+          zoom: BOSTON_ZOOM,
+          pitch: 0,
+          bearing: 0,
+          duration: 2800,
+          essential: true,
+          curve: 1.6,
+        });
+      }, 500);
+
+      // County pulse — animate the active county opacity.
+      let pulseT = 0;
+      pulseIntervalRef.current = setInterval(() => {
+        if (!styleReadyRef.current || !mapRef.current) return;
+        pulseT = (pulseT + 1) % 20;
+        const frac = pulseT / 20;
+        const opacity = 0.2 + 0.35 * (0.5 - 0.5 * Math.cos(frac * Math.PI * 2));
+        const active = useAlertStore.getState().activeCountyFilter;
+        try {
+          mapRef.current.setPaintProperty(COUNTY_FILL_LAYER, "fill-color", [
+            "case",
+            ["==", ["get", "name"], active ?? "___none___"],
+            `rgba(239,68,68,${opacity.toFixed(3)})`,
+            "rgba(34,197,94,0.05)",
+          ]);
+        } catch {
+          /* layer might not exist mid-cleanup */
+        }
+      }, 100);
+
+      // Active-pin ring pulse.
+      let ringT = 0;
+      activeRingIntervalRef.current = setInterval(() => {
+        if (!styleReadyRef.current || !mapRef.current) return;
+        ringT = (ringT + 1) % 20;
+        const frac = ringT / 20;
+        const opacity = 0.35 + 0.55 * (0.5 - 0.5 * Math.cos(frac * Math.PI * 2));
+        try {
+          mapRef.current.setPaintProperty(
+            ACTIVE_RING_LAYER,
+            "circle-stroke-opacity",
+            opacity,
+          );
+        } catch {
+          /* noop */
+        }
+      }, 80);
     });
-  }, [region, mapReady]);
-
-  // Fly to target — then auto-expand cluster and center on the actual bubble
-  useEffect(() => {
-    if (!flyToTarget || !mapRef.current) return;
-    const map = mapRef.current;
-    let cancelled = false;
-
-    // Cancel any in-progress animation to prevent re-entrant render
-    if (map.isMoving()) {
-      map.stop();
-    }
-
-    // Use offset-colocated coords (actual bubble position) when available
-    const looked = marketsLookup.current.get(flyToTarget.marketId);
-    const bubbleCoords: [number, number] = looked?.coords
-      ? [looked.coords[1], looked.coords[0]]
-      : [flyToTarget.coords[1], flyToTarget.coords[0]];
-    // Raw coords for initial flyTo (close enough to find the cluster)
-    const rawCenter: [number, number] = [flyToTarget.coords[1], flyToTarget.coords[0]];
-    const currentZoom = map.getZoom();
-    // Only zoom in if viewing from far away; otherwise just pan
-    const targetZoom = currentZoom >= 4 ? currentZoom : 5;
-
-    // On mobile with bottom panel, offset center upward so icon stays in visible map area
-    const mobile = window.innerWidth <= 768;
-    const padBottom = mobile ? window.innerHeight * 0.4 : 0; // 40dvh panel
-    const padding = padBottom > 0 ? { top: 0, left: 0, right: 0, bottom: padBottom } : undefined;
-
-    // If the target is already near screen center, skip the fly animation
-    const screenPt = map.project(rawCenter);
-    const canvas = map.getCanvas();
-    const cx = canvas.width / (2 * devicePixelRatio);
-    const cy = canvas.height / (2 * devicePixelRatio);
-    const dist = Math.hypot(screenPt.x - cx, screenPt.y - cy);
-    const nearCenter = dist < 120 && Math.abs(targetZoom - currentZoom) < 0.5;
-
-    if (nearCenter) {
-      map.jumpTo({ center: rawCenter, zoom: targetZoom, ...(padding && { padding }) });
-    } else {
-      map.flyTo({ center: rawCenter, zoom: targetZoom, duration: 1500, ...(padding && { padding }) });
-    }
-
-    // After flyTo completes, ensure the bubble is visible and centered
-    const onMoveEnd = () => {
-      if (cancelled) return;
-      const point = map.project(rawCenter);
-      const unclustered = map.queryRenderedFeatures(point, { layers: ["unclustered-point"] });
-      const visible = unclustered.some((f) => f.properties?.marketId === flyToTarget.marketId);
-      if (visible) {
-        // Bubble visible but may be off-center due to offset — recenter
-        if (bubbleCoords[0] !== rawCenter[0] || bubbleCoords[1] !== rawCenter[1]) {
-          map.easeTo({ center: bubbleCoords, duration: 400, ...(padding && { padding }) });
-        }
-        return;
-      }
-
-      // Market still in continent cluster — zoom in just enough to uncluster,
-      // but never zoom OUT from where the animation landed
-      const postAnimZoom = map.getZoom();
-      const minUncluster = ZOOM_TIER_THRESHOLDS[0] + 0.5;
-      map.easeTo({ center: bubbleCoords, zoom: Math.max(minUncluster, postAnimZoom), duration: 800, ...(padding && { padding }) });
-    };
-    map.once("moveend", onMoveEnd);
 
     return () => {
-      cancelled = true;
-      map.off("moveend", onMoveEnd);
+      styleReadyRef.current = false;
+      if (pulseIntervalRef.current) {
+        clearInterval(pulseIntervalRef.current);
+        pulseIntervalRef.current = null;
+      }
+      if (activeRingIntervalRef.current) {
+        clearInterval(activeRingIntervalRef.current);
+        activeRingIntervalRef.current = null;
+      }
+      if (stormAnimRef.current != null) {
+        cancelAnimationFrame(stormAnimRef.current);
+        stormAnimRef.current = null;
+      }
+      if (routeDashIntervalRef.current) {
+        clearInterval(routeDashIntervalRef.current);
+        routeDashIntervalRef.current = null;
+      }
+      mapRef.current?.remove();
+      mapRef.current = null;
     };
-  }, [flyToTarget]);
+  }, []);
 
-  // Feature 2: Track new market appearance animations
+  // Push property updates into the source.
   useEffect(() => {
-    if (!newMarkets || newMarkets.length === 0) return;
-    const now = performance.now();
-    for (const m of newMarkets) {
-      if (newMarketAnimRef.current.has(m.id)) continue;
-      // Use offset-adjusted coords from marketsLookup when available
-      const looked = marketsLookup.current.get(m.id);
-      const coords = looked?.coords || m.coords;
-      if (!coords) continue;
-      newMarketAnimRef.current.set(m.id, {
-        startTime: now,
-        lng: coords[1],
-        lat: coords[0],
-      });
-    }
-    // Cap new market animations map
-    if (newMarketAnimRef.current.size > 100) {
-      const it = newMarketAnimRef.current.keys();
-      while (newMarketAnimRef.current.size > 100) newMarketAnimRef.current.delete(it.next().value!);
-    }
-  }, [newMarkets]);
-
-  // Feature 4: Track whale trade flash animations
-  useEffect(() => {
-    if (!whaleTrades || whaleTrades.length === 0) return;
-    for (const trade of whaleTrades) {
-      const key = `${trade.wallet}:${trade.conditionId}:${trade.timestamp}`;
-      if (seenTradeKeysRef.current.has(key)) continue;
-      seenTradeKeysRef.current.add(key);
-      // Resolve coords via slug→market lookup (offset-adjusted coords)
-      let market: ProcessedMarket | undefined;
-      for (const m of marketsLookup.current.values()) {
-        if (m.slug === trade.slug) { market = m; break; }
-      }
-      if (!market?.coords) continue;
-      tradeFlashesRef.current.push({
-        key,
-        lng: market.coords[1],
-        lat: market.coords[0],
-        startTime: performance.now(),
-        side: trade.side,
-        isSmart: trade.isSmartWallet,
-      });
-    }
-    // Cap animation array to prevent unbounded memory growth
-    if (tradeFlashesRef.current.length > 100) tradeFlashesRef.current.splice(0, tradeFlashesRef.current.length - 100);
-    // Prune dedup set to prevent unbounded memory growth
-    if (seenTradeKeysRef.current.size > 500) {
-      const keep = new Set<string>();
-      for (const trade of whaleTrades) {
-        keep.add(`${trade.wallet}:${trade.conditionId}:${trade.timestamp}`);
-      }
-      seenTradeKeysRef.current = keep;
-    }
-  }, [whaleTrades, markets]);
-
-  // Overlay layer visibility + data fetching
-  useEffect(() => {
-    if (!mapReady || !mapRef.current) return;
     const map = mapRef.current;
-    const active = activeLayers ?? new Set<OverlayLayer>();
-    const ALL: OverlayLayer[] = ["conflicts", "intel", "military", "weather", "natural", "fires", "elections", "outages", "protests", "soccer", "basketball", "baseball", "hockey", "tennis", "golf", "combat"];
-
-    for (const id of ALL) {
-      const vis = active.has(id) ? "visible" : "none";
-      const glowId = `overlay-${id}-glow`;
-      const dotId  = `overlay-${id}-dot`;
-      if (map.getLayer(glowId)) map.setLayoutProperty(glowId, "visibility", vis);
-      if (map.getLayer(dotId))  map.setLayoutProperty(dotId,  "visibility", vis);
-
-      if (active.has(id) && !overlayFetched.current.has(id)) {
-        overlayFetched.current.add(id);
-        fetchOverlayData(id).then((data) => {
-          const src = mapRef.current?.getSource(`overlay-${id}`) as maplibregl.GeoJSONSource | undefined;
-          if (src) {
-            src.setData(data);
-            const count = data.features.length;
-            if (count > 0) {
-              const meta = OVERLAY_META[id];
-              if (meta) {
-                // Show alert banner
-                if (layerAlertTimerRef.current) clearTimeout(layerAlertTimerRef.current);
-                setLayerAlert({ emoji: meta.emoji, label: meta.label, count, color: meta.color });
-                layerAlertTimerRef.current = setTimeout(() => setLayerAlert(null), 4000);
-                // Queue staggered burst rings at each event point (cap at 40)
-                const t0 = performance.now();
-                data.features.slice(0, 40).forEach((feat, i) => {
-                  const coords = (feat.geometry as GeoJSON.Point).coordinates;
-                  overlayBurstRef.current.push({
-                    lng: coords[0], lat: coords[1],
-                    startTime: t0 + i * 40,
-                    color: meta.color,
-                  });
-                });
-                // Cap burst array
-                if (overlayBurstRef.current.length > 200) overlayBurstRef.current.splice(0, overlayBurstRef.current.length - 200);
-              }
-            }
-          }
-        });
-      }
+    if (!map || !styleReadyRef.current) return;
+    const src = map.getSource(PROPERTIES_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    if (!src) return;
+    const sourceProps = properties.length > 0 ? properties : BOSTON_PROPERTIES;
+    const data = propertiesToFeatureCollection(sourceProps);
+    src.setData(data);
+    const ndviSrc = map.getSource(NDVI_HEAT_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    if (ndviSrc) {
+      ndviSrc.setData(buildNdviHeatFeatures(sourceProps));
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeLayers, mapReady]);
+  }, [properties]);
 
-  // Global click listener for popup star buttons
+  // React to filter changes.
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      const btn = target.closest("[data-watch-market]") as HTMLElement | null;
-      if (btn && onToggleWatch) {
-        const marketId = btn.getAttribute("data-watch-market");
-        if (marketId) {
-          onToggleWatch(marketId);
-          // Update button visual immediately
-          const watched = isWatched?.(marketId);
-          btn.textContent = watched ? "☆" : "★";
-          btn.style.color = watched ? "#666" : "#f59e0b";
+    const map = mapRef.current;
+    if (!map || !styleReadyRef.current) return;
+    const filter = buildPinFilter(filterNeighborhood, filterMinUrgency);
+    try {
+      map.setFilter(HALO_LAYER, filter);
+      map.setFilter(PIN_LAYER, filter);
+      map.setFilter(PIN_LABEL_LAYER, filter);
+    } catch {
+      /* noop */
+    }
+  }, [filterNeighborhood, filterMinUrgency]);
+
+  // React to selection changes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReadyRef.current) return;
+    const ids = Array.from(selectedIds);
+    const filter: maplibregl.FilterSpecification = [
+      "all",
+      ["!", ["has", "point_count"]],
+      ["in", ["get", "id"], ["literal", ids]],
+    ];
+    try {
+      map.setFilter(SELECTED_LAYER, filter);
+    } catch {
+      /* noop */
+    }
+  }, [selectedIds]);
+
+  // Crew route overlay: compute path + animate marching ants when >1 selected.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReadyRef.current) return;
+    const layers = [ROUTE_GLOW_LAYER, ROUTE_LINE_LAYER, ROUTE_NODE_LAYER] as const;
+    const setVis = (vis: "visible" | "none") => {
+      for (const id of layers) {
+        if (map.getLayer(id)) {
+          try {
+            map.setLayoutProperty(id, "visibility", vis);
+          } catch {
+            /* noop */
+          }
         }
       }
     };
-    document.addEventListener("click", handler);
-    return () => document.removeEventListener("click", handler);
-  }, [onToggleWatch, isWatched]);
+    if (selectedIds.size <= 1) {
+      setVis("none");
+      if (routeDashIntervalRef.current) {
+        clearInterval(routeDashIntervalRef.current);
+        routeDashIntervalRef.current = null;
+      }
+      const src = map.getSource(ROUTE_SOURCE) as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData({ type: "FeatureCollection", features: [] });
+      }
+      return;
+    }
+    const propsById = new Map(properties.map((p) => [p.id, p]));
+    const selectedProps: Property[] = [];
+    for (const id of selectedIds) {
+      const p = propsById.get(id);
+      if (p) selectedProps.push(p);
+    }
+    if (selectedProps.length <= 1) {
+      setVis("none");
+      return;
+    }
+    const coords = computeRouteCoords(selectedProps);
+    const src = map.getSource(ROUTE_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    if (src) {
+      src.setData(buildRouteFeatures(coords));
+    }
+    setVis("visible");
+    // Marching ants: cycle the dash pattern.
+    if (routeDashIntervalRef.current) {
+      clearInterval(routeDashIntervalRef.current);
+    }
+    const dashSeq: [number, number][] = [
+      [3, 2],
+      [2.5, 2.5],
+      [2, 3],
+      [1.5, 3.5],
+      [1, 4],
+      [0.5, 4.5],
+      [0, 5],
+      [0.5, 4.5],
+      [1, 4],
+      [1.5, 3.5],
+      [2, 3],
+      [2.5, 2.5],
+    ];
+    let step = 0;
+    routeDashIntervalRef.current = setInterval(() => {
+      if (!mapRef.current || !styleReadyRef.current) return;
+      step = (step + 1) % dashSeq.length;
+      try {
+        mapRef.current.setPaintProperty(
+          ROUTE_LINE_LAYER,
+          "line-dasharray",
+          dashSeq[step] as unknown as maplibregl.ExpressionSpecification,
+        );
+      } catch {
+        /* noop */
+      }
+    }, 120);
+  }, [selectedIds, properties]);
+
+  // React to active property changes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReadyRef.current) return;
+    const filter: maplibregl.FilterSpecification = [
+      "all",
+      ["!", ["has", "point_count"]],
+      ["==", ["get", "id"], activePropertyId ?? "___none___"],
+    ];
+    try {
+      map.setFilter(ACTIVE_RING_LAYER, filter);
+    } catch {
+      /* noop */
+    }
+  }, [activePropertyId]);
+
+  // React to county filter changes (outline styling; fill color is driven by the pulse interval).
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReadyRef.current) return;
+    try {
+      map.setPaintProperty(COUNTY_OUTLINE_LAYER, "line-color", [
+        "case",
+        ["==", ["get", "name"], activeCountyFilter ?? "___none___"],
+        "#ef4444",
+        "#22c55e",
+      ]);
+      map.setPaintProperty(COUNTY_OUTLINE_LAYER, "line-width", [
+        "case",
+        ["==", ["get", "name"], activeCountyFilter ?? "___none___"],
+        2,
+        1,
+      ]);
+      map.setPaintProperty(COUNTY_OUTLINE_LAYER, "line-dasharray", [
+        "case",
+        ["==", ["get", "name"], activeCountyFilter ?? "___none___"],
+        ["literal", [2, 2]],
+        ["literal", [1, 0]],
+      ] as unknown as maplibregl.ExpressionSpecification);
+    } catch {
+      /* noop */
+    }
+  }, [activeCountyFilter]);
+
+  // Weather layer toggles + alerts data sync.
+  useEffect(() => {
+    const unsub = useWeatherStore.subscribe((state) => {
+      const map = mapRef.current;
+      if (!map || !styleReadyRef.current) return;
+      try {
+        if (map.getLayer("nexrad-radar")) {
+          map.setLayoutProperty(
+            "nexrad-radar",
+            "visibility",
+            state.showRadar ? "visible" : "none",
+          );
+        }
+        const alertsVis = state.showAlerts ? "visible" : "none";
+        if (map.getLayer("nws-alerts-fill")) {
+          map.setLayoutProperty("nws-alerts-fill", "visibility", alertsVis);
+        }
+        if (map.getLayer("nws-alerts-outline")) {
+          map.setLayoutProperty("nws-alerts-outline", "visibility", alertsVis);
+        }
+        const saVis = state.showServiceArea ? "visible" : "none";
+        if (map.getLayer(SERVICE_FILL_LAYER)) {
+          map.setLayoutProperty(SERVICE_FILL_LAYER, "visibility", saVis);
+        }
+        if (map.getLayer(SERVICE_GLOW_LAYER)) {
+          map.setLayoutProperty(SERVICE_GLOW_LAYER, "visibility", saVis);
+        }
+        if (map.getLayer(SERVICE_OUTLINE_LAYER)) {
+          map.setLayoutProperty(SERVICE_OUTLINE_LAYER, "visibility", saVis);
+        }
+        const ndviVis = state.showNdviHeat ? "visible" : "none";
+        if (map.getLayer(NDVI_HEAT_FILL_LAYER)) {
+          map.setLayoutProperty(NDVI_HEAT_FILL_LAYER, "visibility", ndviVis);
+        }
+        if (map.getLayer(NDVI_HEAT_OUTLINE_LAYER)) {
+          map.setLayoutProperty(NDVI_HEAT_OUTLINE_LAYER, "visibility", ndviVis);
+        }
+        const src = map.getSource("nws-alerts") as maplibregl.GeoJSONSource | undefined;
+        if (src) {
+          src.setData({ type: "FeatureCollection", features: state.alerts });
+        }
+      } catch {
+        /* mid-cleanup, ignore */
+      }
+    });
+
+    // Apply current store state once map is ready.
+    const applyNow = () => {
+      const map = mapRef.current;
+      if (!map || !styleReadyRef.current) return;
+      const state = useWeatherStore.getState();
+      try {
+        if (map.getLayer("nexrad-radar")) {
+          map.setLayoutProperty(
+            "nexrad-radar",
+            "visibility",
+            state.showRadar ? "visible" : "none",
+          );
+        }
+        const alertsVis = state.showAlerts ? "visible" : "none";
+        if (map.getLayer("nws-alerts-fill")) {
+          map.setLayoutProperty("nws-alerts-fill", "visibility", alertsVis);
+        }
+        if (map.getLayer("nws-alerts-outline")) {
+          map.setLayoutProperty("nws-alerts-outline", "visibility", alertsVis);
+        }
+        const saVis = state.showServiceArea ? "visible" : "none";
+        if (map.getLayer(SERVICE_FILL_LAYER)) {
+          map.setLayoutProperty(SERVICE_FILL_LAYER, "visibility", saVis);
+        }
+        if (map.getLayer(SERVICE_GLOW_LAYER)) {
+          map.setLayoutProperty(SERVICE_GLOW_LAYER, "visibility", saVis);
+        }
+        if (map.getLayer(SERVICE_OUTLINE_LAYER)) {
+          map.setLayoutProperty(SERVICE_OUTLINE_LAYER, "visibility", saVis);
+        }
+        const ndviVis = state.showNdviHeat ? "visible" : "none";
+        if (map.getLayer(NDVI_HEAT_FILL_LAYER)) {
+          map.setLayoutProperty(NDVI_HEAT_FILL_LAYER, "visibility", ndviVis);
+        }
+        if (map.getLayer(NDVI_HEAT_OUTLINE_LAYER)) {
+          map.setLayoutProperty(NDVI_HEAT_OUTLINE_LAYER, "visibility", ndviVis);
+        }
+        const src = map.getSource("nws-alerts") as maplibregl.GeoJSONSource | undefined;
+        if (src) {
+          src.setData({ type: "FeatureCollection", features: state.alerts });
+        }
+      } catch {
+        /* noop */
+      }
+    };
+    const interval = setInterval(() => {
+      if (styleReadyRef.current) {
+        applyNow();
+        clearInterval(interval);
+      }
+    }, 100);
+
+    return () => {
+      unsub();
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Seed NWS alerts on mount.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAlerts() {
+      try {
+        const res = await fetch("/api/weather/alerts");
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          features: import("@/lib/weather/nws").NWSAlertFeature[];
+        };
+        if (cancelled) return;
+        useWeatherStore.getState().setAlerts(data.features ?? []);
+      } catch {
+        /* silent */
+      }
+    }
+    loadAlerts();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Fly-to subscription.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !flyToTarget) return;
+    map.flyTo({
+      center: [flyToTarget.lng, flyToTarget.lat],
+      zoom: flyToTarget.zoom ?? 14,
+      duration: 1200,
+      essential: true,
+    });
+    useLeadStore.getState().setFlyTo(null);
+  }, [flyToTarget]);
+
+  const flyToPreset = (center: [number, number], zoom: number) => {
+    mapRef.current?.flyTo({ center, zoom, duration: 1400, essential: true, curve: 1.4 });
+  };
 
   return (
-    <div className="relative w-full h-full overflow-hidden">
-      <div ref={mapContainer} className="w-full h-full" />
-      <MapToolbar
-        timeRange={timeRange}
-        onTimeRangeChange={onTimeRangeChange}
-        onToggleFullscreen={onToggleFullscreen}
-        isFullscreen={isFullscreen}
-        activeCategories={activeCategories}
-        onToggleCategory={onToggleCategory}
-        region={region ?? "global"}
-        onRegionChange={onRegionChange}
-        colorMode={colorMode}
-        onColorModeChange={onColorModeChange}
-        activeLayers={activeLayers}
-        onToggleLayer={onToggleLayer}
-      />
-      {/* Hover preview popup — portal to body */}
-      {hoverCountry && (() => {
-        const all = markets;
-        const ms = all.filter((m) => marketMatchesCountry(m.location, hoverCountry.name));
-        const active = ms.filter((m) => !m.closed);
-        const vol = ms.reduce((s, m) => s + m.volume, 0);
-        const vol24h = ms.reduce((s, m) => s + (m.volume24h || 0), 0);
-        const flag = getCountryFlag(hoverCountry.name);
-        const POP_W = 200;
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const left = Math.min(hoverCountry.x + 16, vw - POP_W - 8);
-        const top = Math.min(hoverCountry.y + 16, vh - 160);
-        return createPortal(
-          <div
-            className="fixed z-[9998] bg-[var(--bg)] border border-[var(--border)] rounded-md font-mono pointer-events-none"
-            style={{ top, left, width: POP_W, padding: "10px 12px", boxShadow: "0 8px 24px rgba(0,0,0,0.5)" }}
+    <div className="absolute inset-0">
+      <div ref={mapContainer} className="absolute inset-0" />
+
+      {/* Neighborhood preset bar */}
+      <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-1.5 max-w-[calc(100%-180px)]">
+        {NEIGHBORHOOD_PRESETS.map((p) => (
+          <button
+            key={p.name}
+            onClick={() => flyToPreset(p.center, p.zoom)}
+            className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-black/55 hover:bg-black/80 border border-white/10 text-white/90 backdrop-blur transition-colors"
           >
-            <div className="flex items-center gap-1.5 mb-2">
-              <span className="text-[16px] leading-none">{flag}</span>
-              <span className="text-[11px] text-[var(--text)]">{hoverCountry.name}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-              <span className="text-[var(--text-faint)]">{t("common.markets")}</span>
-              <span className="text-[var(--text-secondary)] tabular-nums">{ms.length}</span>
-              <span className="text-[var(--text-faint)]">{t("common.active")}</span>
-              <span className="text-[var(--text-secondary)] tabular-nums">{active.length}</span>
-              <span className="text-[var(--text-faint)]">{t("common.volume")}</span>
-              <span className="text-[var(--text-secondary)] tabular-nums">{formatVolume(vol)}</span>
-              <span className="text-[var(--text-faint)]">{t("common.vol24h")}</span>
-              <span className="text-[var(--text-secondary)] tabular-nums">{formatVolume(vol24h)}</span>
-            </div>
-            {active.length > 0 && (() => {
-              const topMarket = active.reduce((best, m) => (m.volume24h || 0) > (best.volume24h || 0) ? m : best);
-              return (
-                <div className="mt-2 pt-2 border-t border-[var(--border-subtle)]">
-                  <div className="text-[10px] text-[var(--text-faint)] uppercase tracking-wider mb-0.5">{t("common.topMarket")}</div>
-                  <div className="text-[10px] text-[var(--text-dim)] line-clamp-2 leading-snug">
-                    {localizeMarket(topMarket, locale).title}
-                  </div>
-                </div>
-              );
-            })()}
-          </div>,
-          document.body
-        );
-      })()}
+            {p.name}
+          </button>
+        ))}
+      </div>
 
-      {/* Overlay layer loaded alert */}
-      {layerAlert && (
-        <div
-          className="absolute bottom-14 left-2.5 z-20 font-mono flex items-center gap-2 px-3 py-2 text-[12px] pointer-events-none"
-          style={{
-            background: "rgba(8,8,8,0.92)",
-            border: `1px solid ${layerAlert.color}40`,
-            borderLeft: `3px solid ${layerAlert.color}`,
-            backdropFilter: "blur(6px)",
-            animation: "overlayAlertIn 0.25s ease-out",
-          }}
-        >
-          <span className="text-[15px] leading-none">{layerAlert.emoji}</span>
-          <span className="tabular-nums font-bold" style={{ color: layerAlert.color }}>{layerAlert.count}</span>
-          <span className="text-[#aaa]">{layerAlert.label}</span>
-          <span className="text-[#555]">loaded</span>
-        </div>
-      )}
-
-      {hoverOverlay && createPortal(
-        (() => {
-          const TIP_W = 220;
-          const vw = window.innerWidth;
-          const vh = window.innerHeight;
-          const left = Math.min(hoverOverlay.x + 14, vw - TIP_W - 8);
-          const top  = Math.min(hoverOverlay.y + 14, vh - 160);
-          return (
-            <div
-              className="fixed z-[9998] font-mono pointer-events-none"
-              style={{
-                top, left, width: TIP_W,
-                background: "#0c0c0c",
-                border: `1px solid #2a2a2a`,
-                borderLeft: `2px solid ${hoverOverlay.color}`,
-                boxShadow: `0 4px 20px rgba(0,0,0,0.7), 0 0 0 0 transparent`,
-                padding: "8px 10px",
-              }}
-            >
-              {/* Layer badge */}
-              <div className="text-[10px] uppercase tracking-widest mb-1.5" style={{ color: hoverOverlay.color }}>
-                {hoverOverlay.layerId.replace(/-/g, " ")}
-              </div>
-              {/* Title */}
-              <div className="text-[11px] text-[#ddd] leading-snug mb-1.5 line-clamp-3">
-                {hoverOverlay.title}
-              </div>
-              {/* Key-value rows */}
-              {hoverOverlay.rows.length > 0 && (
-                <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 mt-1 pt-1.5 border-t border-[#222]">
-                  {hoverOverlay.rows.map(({ label, value }) => (
-                    <React.Fragment key={label}>
-                      <span className="text-[10px] text-[#555] uppercase tracking-wider">{label}</span>
-                      <span className="text-[10px] text-[#999] tabular-nums truncate">{value}</span>
-                    </React.Fragment>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })(),
-        document.body
-      )}
-
-      {hoverMarket && hoverPos && createPortal(
-        <div
-          className="fixed z-[9999] bg-[var(--bg)] border border-[var(--border)] rounded-md overflow-y-auto"
-          style={{
-            ...(hoverPos.top !== undefined ? { top: hoverPos.top } : {}),
-            ...(hoverPos.bottom !== undefined ? { bottom: hoverPos.bottom } : {}),
-            left: hoverPos.left,
-            width: PREVIEW_W,
-            maxHeight: PREVIEW_MAX_H,
-            padding: "12px 14px",
-            boxShadow: "0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05)",
-          }}
-          onMouseEnter={() => {
-            // Cancel pending dismiss when mouse enters popup
-            if (hoverTimer.current) { clearTimeout(hoverTimer.current); hoverTimer.current = null; }
-          }}
-          onMouseLeave={() => {
-            // Dismiss when mouse leaves popup
-            setHoverMarket(null);
-            setHoverPos(null);
-          }}
-        >
-          <Suspense fallback={<div className="text-[12px] text-[var(--text-faint)] font-mono py-4">loading...</div>}>
-            <MarketPreview market={hoverMarket} onTrade={onTrade} hideChart />
-          </Suspense>
-        </div>,
-        document.body
-      )}
     </div>
   );
 }
-
-function escapeHtml(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
-
-
-export default memo(WorldMapInner, (prev, next) => {
-  if (prev.markets !== next.markets) return false;
-  if (!setsEqual(prev.activeCategories, next.activeCategories)) return false;
-  if (prev.flyToTarget !== next.flyToTarget) return false;
-  if (prev.timeRange !== next.timeRange) return false;
-  if (prev.isFullscreen !== next.isFullscreen) return false;
-  if (prev.selectedCountry !== next.selectedCountry) return false;
-  if (prev.selectedMarketId !== next.selectedMarketId) return false;
-  if (prev.colorMode !== next.colorMode) return false;
-  if (prev.region !== next.region) return false;
-  if (prev.newMarkets !== next.newMarkets) return false;
-  if (prev.whaleTrades !== next.whaleTrades) return false;
-  if (prev.isWatched !== next.isWatched) return false;
-  if (!setsEqual(prev.activeLayers, next.activeLayers)) return false;
-  return true;
-});
