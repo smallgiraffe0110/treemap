@@ -12,6 +12,23 @@ import type { Property } from "@/types";
 import type { FeatureCollection, Feature, Point, Polygon, MultiPolygon, LineString } from "geojson";
 
 const MAP_STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+
+// Inline fallback when the remote tile CDN is unreachable (ad blocker, offline, slow link).
+// Renders a flat dark canvas — property pins, county outlines, storm tracks still draw on top.
+const FALLBACK_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  name: "treemap-offline",
+  sources: {},
+  layers: [
+    {
+      id: "background",
+      type: "background",
+      paint: { "background-color": "#0a0a0a" },
+    },
+  ],
+  glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+};
+
 const BOSTON_CENTER: [number, number] = [-71.10, 42.31];
 const BOSTON_ZOOM = 11.2;
 
@@ -367,16 +384,35 @@ export function WorldMap() {
     loadingEl.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0a0a0a;color:#909090;font-family:Inter,sans-serif;font-size:13px;z-index:2;pointer-events:none";
     loadingEl.innerHTML = '<div><div style="font-size:32px;margin-bottom:8px;text-align:center">🌍</div>Loading map…</div>';
     mapContainer.current.appendChild(loadingEl);
-    const loadTimeout = window.setTimeout(() => {
-      // If still loading after 10s, replace with the WebGL-blocked fallback.
+
+    // If tile CDN style doesn't load within 3s (blocked by adblocker, offline, slow CDN),
+    // swap to inline FALLBACK_STYLE so map still renders with pins/overlays.
+    let swappedToFallback = false;
+    const swapToFallback = (reason: string) => {
+      if (swappedToFallback || styleReadyRef.current) return;
+      swappedToFallback = true;
+      console.warn(`[WorldMap] tile style unreachable (${reason}), switching to offline fallback style.`);
+      try {
+        map.setStyle(FALLBACK_STYLE);
+      } catch (err) {
+        console.warn("[WorldMap] setStyle(fallback) failed", err);
+      }
+    };
+    const loadTimeout = window.setTimeout(() => swapToFallback("3s timeout"), 3000);
+    // Hard timeout: if even the fallback style fails to fire `load`, give up and show the error UI.
+    const hardTimeout = window.setTimeout(() => {
       if (!styleReadyRef.current && mapContainer.current && document.getElementById("treemap-loading")) {
         mapContainer.current.innerHTML = renderMapFallback("Map tiles could not load. This usually means WebGL is disabled or your network blocks tile CDNs.");
       }
-    }, 10000);
+    }, 8000);
 
     map.on("error", (e) => {
-      // Maplibre errors are non-fatal individually but log to help diagnose.
-      console.warn("[WorldMap] maplibre error", (e as { error?: { message?: string } }).error?.message ?? e);
+      const msg = (e as { error?: { message?: string } }).error?.message ?? "";
+      console.warn("[WorldMap] maplibre error", msg || e);
+      // Style/source fetch failures → swap immediately so we don't sit on a black screen.
+      if (/style|source|tiles|fetch|network/i.test(msg)) {
+        swapToFallback(msg.slice(0, 80));
+      }
     });
 
     try {
@@ -392,6 +428,7 @@ export function WorldMap() {
 
     map.on("load", () => {
       window.clearTimeout(loadTimeout);
+      window.clearTimeout(hardTimeout);
       document.getElementById("treemap-loading")?.remove();
       // Globe projection: supported in maplibre-gl >= 5; safe no-op on 4.x.
       const maybeGlobe = map as unknown as {
@@ -1341,7 +1378,7 @@ export function WorldMap() {
 
   return (
     <div className="absolute inset-0">
-      <div ref={mapContainer} className="absolute inset-0" />
+      <div ref={mapContainer} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />
 
       {/* Neighborhood preset bar */}
       <div className="absolute left-3 top-3 z-10 flex flex-wrap gap-1.5 max-w-[calc(100%-180px)]">
